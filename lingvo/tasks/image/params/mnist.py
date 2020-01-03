@@ -68,3 +68,30 @@ class LeNet5(Base):
     p.train.save_interval_seconds = 10  # More frequent checkpoints.
     p.eval.samples_per_summary = 0  # Eval the whole set.
     return p
+
+@model_registry.RegisterSingleTaskModel
+class SmoothLeNet5(Base):
+  """LeNet with label smoothing params for MNIST classification."""
+
+  BN = False
+  DROP = 0.2
+  LS = 0.1
+
+  def Task(self):
+    p = classifier.ModelV2.Params()
+    p.label_smoothing = self.LS
+    p.name = 'label_smoothing_lenet5'
+
+    p.extract = classifier.Extract.Params()
+    # Overall architecture:
+    #   conv, maxpool, conv, maxpool, fc, softmax.
+    p.extract.filter_shapes = [(5, 5, 1, 20), (5, 5, 20, 50)]
+    p.extract.window_shapes = [(2, 2), (2, 2)]
+    p.extract.batch_norm = self.BN
+    p.extract.dropout_prob = self.DROP
+
+    p.softmax.input_dim = 50
+    p.softmax.num_classes = 10
+    p.train.save_interval_seconds = 10  # More frequent checkpoints.
+    p.eval.samples_per_summary = 0  # Eval the whole set.
+    return p

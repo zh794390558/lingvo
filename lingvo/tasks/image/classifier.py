@@ -210,6 +210,77 @@ class ModelV1(BaseClassifier):
         dec_out_dict['num_samples_in_batch'][0])
 
 
+
+
+class Extract(base_layer.BaseLayer):
+  """CNNs with maxpooling followed by a softmax."""
+
+  @classmethod
+  def Params(cls):
+    p = super(Extract, cls).Params()
+    p.Define('input', None, 'input params')
+    p.Define(
+        'filter_shapes', [(0, 0, 0, 0)],
+        'Conv filter shapes. Must be a list of sequences of 4. '
+        'Elements are in order of height, width, in_channel, out_channel')
+    p.Define(
+        'window_shapes', [(0, 0)],
+        'Max pooling window shapes. Must be a list of sequences of 2. '
+        'Elements are in order of height, width.')
+    p.Define('batch_norm', False, 'Apply BN or not after the conv.')
+    p.Define('dropout_prob', 0.0,
+             'Probability of the dropout applied after pooling.')
+    return p
+
+  @base_layer.initializer
+  def __init__(self, params):
+    super(Extract, self).__init__(params)
+    p = self.params
+    assert p.name
+
+    with tf.variable_scope(p.name):
+      assert len(p.filter_shapes) == len(p.window_shapes)
+
+      # A few conv + max pooling layers.
+      shape = [None] + list(p.input.data_shape)
+      conv_params = []
+      pooling_params = []
+      for i, (kernel,
+              window) in enumerate(zip(p.filter_shapes, p.window_shapes)):
+        conv_params.append(layers.ConvLayer.Params().Set(
+            name='conv%d' % i,
+            filter_shape=kernel,
+            filter_stride=(1, 1),
+            batch_norm=p.batch_norm))
+        pooling_params.append(layers.PoolingLayer.Params().Set(
+            name='pool%d' % i, window_shape=window, window_stride=window))
+      self.CreateChildren('conv', conv_params)
+      self.CreateChildren('pool', pooling_params)
+
+      # Logs expected activation shapes.
+      for i in range(len(self.conv)):
+        tf.logging.info('shape %d %s', i, shape)
+        shape = self.conv[i].OutShape(shape)
+        tf.logging.info('shape %d %s', i, shape)
+        shape = self.pool[i].OutShape(shape)
+      tf.logging.info('shape %s', shape)
+
+  def FProp(self, theta, input_batch):
+    p = self.params
+    batch = tf.shape(input_batch)[0]
+    height, width, depth = p.input.data_shape
+    act = tf.reshape(input_batch, [batch, height, width, depth])
+    for i in range(len(self.conv)):
+      # Conv, BN (optional)
+      act, _ = self.conv[i].FProp(theta.conv[i], act)
+      # MaxPool
+      act, _ = self.pool[i].FProp(theta.pool[i], act)
+      # Dropout (optional)
+      if p.dropout_prob > 0.0 and not self.do_eval:
+        act = tf.nn.dropout(
+            act, keep_prob=1.0 - p.dropout_prob, seed=p.random_seed)
+    return act
+
 class ModelV2(BaseClassifier):
   """CNNs followed by a softmax."""
 
@@ -220,6 +291,11 @@ class ModelV2(BaseClassifier):
     p.Define('label_smoothing', 0., 'Smooth the labels towards 1/num_classes.')
     p.Define('compute_accuracy_for_training', False,
              'Whether to compute accuracy for training.')
+    tp = p.train
+    tp.learning_rate = 1e-4  # Adam base LR.
+    tp.lr_schedule = (
+        schedule.LinearRampupExponentialDecayScaledByNumSplitSchedule.Params()
+        .Set(warmup=100, decay_start=100000, decay_end=1000000, min=0.1))
     return p
 
   @base_layer.initializer
@@ -227,6 +303,8 @@ class ModelV2(BaseClassifier):
     super(ModelV2, self).__init__(params)
     p = self.params
     assert p.name
+    assert p.input
+    p.extract.input = p.input
 
     with tf.variable_scope(p.name):
       self.CreateChild('extract', p.extract)
@@ -317,3 +395,21 @@ class ModelV2(BaseClassifier):
           'prediction': tf.argmax(logits, name='prediction'),
       }
       return fetches, feeds
+
+
+class PredictModel(predictor_runner_base.PredictorRunnerBase):
+  
+  def __init__(*args, **kwargs):
+    super().__init__(*args, **kwargs)
+
+  def InputGenerator(self):
+    cnt = 0
+    while True:
+      cnt+=1
+      yield np.ones((1, 28,28))
+      if cnt == 100:
+        break
+ 
+  def RunBatch(self, output_dir, batch):
+    ret = self._predictor.Run(['prediction', 'probs'], normalized_image=batch)
+    print(ret.shape)
