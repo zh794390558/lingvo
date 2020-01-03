@@ -395,21 +395,3 @@ class ModelV2(BaseClassifier):
           'prediction': tf.argmax(logits, name='prediction'),
       }
       return fetches, feeds
-
-
-class PredictModel(predictor_runner_base.PredictorRunnerBase):
-  
-  def __init__(*args, **kwargs):
-    super().__init__(*args, **kwargs)
-
-  def InputGenerator(self):
-    cnt = 0
-    while True:
-      cnt+=1
-      yield np.ones((1, 28,28))
-      if cnt == 100:
-        break
- 
-  def RunBatch(self, output_dir, batch):
-    ret = self._predictor.Run(['prediction', 'probs'], normalized_image=batch)
-    print(ret.shape)
