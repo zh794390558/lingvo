@@ -1,4 +1,3 @@
 bazel-*
 *.pyc
-egs/mnist/exp
-egs/mnist/log
+dist
