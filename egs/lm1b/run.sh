@@ -1,6 +1,7 @@
+
 stage=$1
-model=asr.librispeech.Librispeech960Grapheme
-logdir=$PWD/egs/librispeech/exp/$model
+model=lm.one_billion_wds.WordLevelOneBwdsSimpleSampledSoftmaxTiny
+logdir=$PWD/egs/lm1b/exp/$model
 
 echo stage: $stage
 echo workdir: $PWD
@@ -9,19 +10,18 @@ echo logdir: $logdir
 
 if [ $stage -le 0 ] && [ $stage -ge 0 ];then
   # gen data 
-  echo "Gen Data..." 
+  bazel run -c opt --distdir=~/dist lingvo/tasks/lm/tools:download_lm1b --  --outdir="/nfs/project/datasets/opensource_data/lm1b" --count_cutoff 3
 fi
 
 if [ $stage -le 1 ] && [ $stage -ge 1 ];then
   # train and eval
-  echo "Training..."
   bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \
     --mode=sync    \
-    --job=controller,trainer_client \
-    --run_locally=gpu    \
+    --job=controller,trainer_client,evaler_dev,decoder_test \
+    --run_locally=cpu     \
     --saver_max_to_keep=10     \
     --saver_keep_checkpoint_every_n_hours=100000.0    \
-    --worker_gpus=4   \
+    --worker_gpus=0   \
     --worker_split_size=1     \
     --model=$model \
     --logdir=$logdir \
@@ -29,31 +29,6 @@ if [ $stage -le 1 ] && [ $stage -ge 1 ];then
 fi
 
 if [ $stage -le 2 ] && [ $stage -ge 2 ];then
-  # eval dev
-  echo "Eval dev..."
-  bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \
-    --mode=sync    \
-    --job=evaler_dev,decoder_dev \
-    --run_locally=cpu     \
-    --model=$model \
-    --logdir=$logdir \
-    --alsologtostderr
-fi
-
-if [ $stage -le 3 ] && [ $stage -ge 3 ];then
-  # eval test
-  echo "Eval test..."
-  bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \
-    --mode=sync    \
-    --job=decoder_test \
-    --run_locally=cpu     \
-    --model=$model \
-    --logdir=$logdir \
-    --alsologtostderr
-fi
-
-
-if [ $stage -le 4 ] && [ $stage -ge 4 ];then
   # dump inference graph
   bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \
     --mode=write_inference_graph  \
@@ -63,7 +38,7 @@ if [ $stage -le 4 ] && [ $stage -ge 4 ];then
     --alsologtostderr
 fi
 
-if [ $stage -le 5 ] && [ $stage -ge 5 ];then
+if [ $stage -le 3 ] && [ $stage -ge 3 ];then
   # interactive predictor
   CUDA_VISIBLE_DEVICES= bazel run lingvo/core:predictor
 
