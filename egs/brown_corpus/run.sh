@@ -14,15 +14,19 @@ if [ $stage -le 0 ] && [ $stage -ge 0 ];then
 fi
 
 
-if [ $stage -le 1 ] && [ $stage -ge 1 ];then # train and eval echo "Training..." bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \ --mode=sync    \
+if [ $stage -le 1 ] && [ $stage -ge 1 ];then 
+   # train and eval 
+   echo "Training..." 
+   bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \
+    --mode=sync    \
     --job=controller,trainer_client \
     --run_locally=gpu    \
-    --saver_max_to_keep=10     \
-    --saver_keep_checkpoint_every_n_hours=100000.0    \
     --worker_gpus=1   \
     --worker_split_size=1     \
     --model=$model \
     --logdir=$logdir \
+    --saver_max_to_keep=10     \
+    --saver_keep_checkpoint_every_n_hours=100000.0    \
     --alsologtostderr
 fi
 
@@ -53,6 +57,7 @@ fi
 
 if [ $stage -le 4 ] && [ $stage -ge 4 ];then
   # dump inference graph
+  echo "Dump Model..."
   bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \
     --mode=write_inference_graph  \
     --run_locally=cpu     \
@@ -71,5 +76,6 @@ if [ $stage -le 5 ] && [ $stage -ge 5 ];then
 fi
 
 if [ $stage -le 6 ] && [ $stage -ge 6 ];then
+  echo "Test..."
   CUDA_VISIBLE_DEVICES= bazel test --test_output=all lingvo/tasks/punctuator/...
 fi
