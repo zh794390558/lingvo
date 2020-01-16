@@ -1,6 +1,7 @@
+
 stage=$1
-model=asr.librispeech.Librispeech960Grapheme
-logdir=$PWD/egs/librispeech/exp/$model
+model=punctuator.codelab.RNMTModel
+logdir=$PWD/egs/brown_corpus/exp/$model
 
 echo stage: $stage
 echo workdir: $PWD
@@ -9,15 +10,16 @@ echo logdir: $logdir
 
 if [ $stage -le 0 ] && [ $stage -ge 0 ];then
   # gen data 
-  echo "Gen Data..." 
+  bazel run -c opt --distdir=~/dist lingvo/tasks/punctuator/tools:download_brown_corpus --  --outdir="/nfs/project/datasets/opensource_data/brown_corpus"
 fi
+
 
 if [ $stage -le 1 ] && [ $stage -ge 1 ];then # train and eval echo "Training..." bazel run -c opt --distdir=~/dist --config=cuda //lingvo:trainer --  \ --mode=sync    \
     --job=controller,trainer_client \
     --run_locally=gpu    \
     --saver_max_to_keep=10     \
     --saver_keep_checkpoint_every_n_hours=100000.0    \
-    --worker_gpus=4   \
+    --worker_gpus=1   \
     --worker_split_size=1     \
     --model=$model \
     --logdir=$logdir \
@@ -66,4 +68,8 @@ if [ $stage -le 5 ] && [ $stage -ge 5 ];then
   #pred = Predictor(inference_graph=inference_graph)
   #pred.Load("/tmp/logdir/train/ckpt-00000000")
   #[topk_hyps] = pred.Run(["topk_hyps"], src_strings=["Hello World"])
+fi
+
+if [ $stage -le 6 ] && [ $stage -ge 6 ];then
+  CUDA_VISIBLE_DEVICES= bazel test --test_output=all lingvo/tasks/punctuator/...
 fi
