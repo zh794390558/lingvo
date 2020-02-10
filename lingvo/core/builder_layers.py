@@ -821,7 +821,7 @@ class GraphLayer(base_layer.BaseLayer):
       for i, (signature, sub) in enumerate(p.sub):
         assert signature
         sig = GraphSignature(signature)
-        assert sig.outputs
+        assert sig.outputs, '{}'.format(signature)
         name = sub.name
         if not name:
           name = '%s_%02d' % (sig.outputs[0], i)
@@ -832,9 +832,12 @@ class GraphLayer(base_layer.BaseLayer):
   def FProp(self, theta, *args):
     p = self.params
 
-    graph_tensors = GraphTensors()
+    graph_tensors = self._fprop = GraphTensors()
     with tf.name_scope(p.name):
-      assert len(p.input_endpoints) == len(args)
+      if len(p.input_endpoints) != len(args):
+        raise ValueError(
+            'Wrong number of inputs for {}: required={}, provided={}'.format(
+                p.name, len(p.input_endpoints), len(args)))
       for n, t in zip(p.input_endpoints, args):
         if isinstance(t, py_utils.NestedMap):
           assert all(isinstance(x, tf.Tensor) for x in t.Flatten()), t
@@ -890,35 +893,6 @@ class GraphLayer(base_layer.BaseLayer):
 
     layer_out = tuple(graph_tensors.GetTensor(x) for x in p.output_endpoints)
     return py_utils.NestedMap(flops=total, out_shapes=layer_out)
-
-  def FPropNestedMap(self, theta, input_map):
-    """Forward propagation where input and output are both single NestedMap.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this layer and
-        its children layers.
-      input_map: A NestedMap containing endpoints in p.input_endpoints.
-
-    Returns:
-      A single NestedMap containing endpoints in p.output_endpoints.
-    """
-    p = self.params
-    fprop_args = []
-    for endpoint in p.input_endpoints:
-      if endpoint in input_map:
-        fprop_args.append(input_map[endpoint])
-      else:
-        raise ValueError('Input endpoint {} is not an attribute of the input '
-                         'nested map {}'.format(endpoint, input_map))
-    assert len(fprop_args) == len(p.input_endpoints)
-    outs = self.FProp(theta, *fprop_args)
-    if len(p.output_endpoints) == 1:
-      outs = (outs,)
-    assert len(outs) == len(p.output_endpoints)
-    output_map = py_utils.NestedMap()
-    for output, endpoint in zip(outs, p.output_endpoints):
-      output_map[endpoint] = output
-    return output_map
 
 
 class ParallelLayer(base_layer.BaseLayer):
@@ -1061,9 +1035,9 @@ class LinearLayer(base_layer.BaseLayer):
     with tf.name_scope(p.name):
       computation_cost.Add(
           self, 'flops',
-          tf.reduce_prod(tf.cast(tf.shape(inputs)[:-1], tf.int64)) * tf.cast(
-              symbolic.EvalExpr(symbolic.TENSOR_VALUES,
-                                p.input_dims * p.output_dims), tf.int64) * 2)
+          tf.reduce_prod(tf.cast(tf.shape(inputs)[:-1], tf.int64)) *
+          tf.cast(symbolic.ToTensor(p.input_dims * p.output_dims), tf.int64) *
+          2)
       return py_utils.ProjectLastDim(inputs, theta.w, p.input_dims,
                                      p.output_dims)
 

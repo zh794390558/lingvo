@@ -33,7 +33,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import importlib
 import inspect
 import os
 import re
@@ -142,6 +141,11 @@ tf.flags.DEFINE_string(
     'job prefix, evaler will match all evaler jobs, while '
     'evaler_dev and decoder_dev will only match the corresponding '
     'jobs that are on the dev set.')
+
+tf.flags.DEFINE_bool(
+    'add_summary', None,
+    'Whether we should output summaries. The default value "None", enables '
+    'summaries based on the job type.')
 
 
 @tf.flags.validator('vizier_reporting_job')
@@ -263,7 +267,6 @@ class Controller(base_runner.BaseRunner):
   def __init__(self, *args, **kwargs):
     super(Controller, self).__init__(*args, **kwargs)
     assert not self._model_task_name, 'Controller needs all tasks!'
-    tf.gfile.MakeDirs(self._train_dir)
     self._control_dir = os.path.join(self._logdir, 'control')
     tf.gfile.MakeDirs(self._control_dir)
     self._summary_writer = self._CreateSummaryWriter(self._control_dir)
@@ -277,7 +280,7 @@ class Controller(base_runner.BaseRunner):
         self._params = self._model.params
         self._model.ConstructFPropBPropGraph()
         self._summary_op = tf.summary.merge_all()
-        self.initialize_tables = tf.tables_initializer()
+        self._initialize_tables = tf.tables_initializer()
         self._initialize_local_vars = tf.local_variables_initializer()
         self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
         self.close_queue_ops = tf.get_collection(py_utils.CLOSE_QUEUE_OPS)
@@ -316,7 +319,7 @@ class Controller(base_runner.BaseRunner):
         return
 
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
 
@@ -386,7 +389,7 @@ class Trainer(base_runner.BaseRunner):
         self._model = self.params.Instantiate()
         self._params = self._model.params
         self._model.ConstructFPropBPropGraph()
-      self.initialize_tables = tf.tables_initializer()
+      self._initialize_tables = tf.tables_initializer()
       self._initialize_local_vars = tf.local_variables_initializer()
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
       self.close_queue_ops = tf.get_collection(py_utils.CLOSE_QUEUE_OPS)
@@ -418,9 +421,12 @@ class Trainer(base_runner.BaseRunner):
     self._start_up_delay_steps = (((worker_id + 1) * worker_id / 2) *
                                   self.params.train.start_up_delay_steps)
 
-  def _SummarizeValue(self, steps, tag, value, writer):
+  def _SummarizeValue(self, steps, tag, value, writer=None):
     if writer:
       writer.add_summary(metrics.CreateScalarSummary(tag, value), steps)
+    else:
+      self._summary_writer.add_summary(
+          metrics.CreateScalarSummary(tag, value), steps)
 
   def Start(self):
     self._RunLoop('trainer', self._Loop)
@@ -447,7 +453,7 @@ class Trainer(base_runner.BaseRunner):
       return
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
       global_step = self._WaitUntilInit(sess, self._start_up_delay_steps)
@@ -497,18 +503,17 @@ class Trainer(base_runner.BaseRunner):
         model_task.ProcessFPropResults(sess, global_step, eval_metrics,
                                        per_example_tensors)
 
-        step_rate, example_rate = self._step_rate_tracker.ComputeStepRate(
+        step_rate, example_rate, total_examples = self._step_rate_tracker.ComputeStepRate(
             global_step, eval_metrics['num_samples_in_batch'][0])
-        self._SummarizeValue(global_step, 'global_step/sec', step_rate,
-                             self._summary_writer)
-        self._SummarizeValue(global_step, 'examples/sec', example_rate,
-                             self._summary_writer)
+        self._SummarizeValue(global_step, 'global_step/sec', step_rate)
+        self._SummarizeValue(global_step, 'examples/sec', example_rate)
+        self._SummarizeValue(global_step, 'total_samples', total_examples)
 
         msg = 'step:%6d, steps/sec: %0.2f, examples/sec: %0.2f' % (
             global_step, step_rate, example_rate)
         for key, (val, _) in sorted(six.iteritems(eval_metrics)):
           msg += ' %s:%.8g' % (key, val)
-          self._SummarizeValue(global_step, key, val, self._summary_writer)
+          self._SummarizeValue(global_step, key, val)
         if global_step >= next_status_step:
           self._SetStatusMessage(msg)
           self._ExportMetrics(
@@ -648,12 +653,11 @@ class TrainerTpu(base_runner.BaseRunner):
         self._tpu_train_ops = (
             _ConstructPostTrainingLoop(all_tpu_ops, outfeed_dequeue_op))
 
-      self.initialize_tables = tf.tables_initializer()
+        if FLAGS.checkpoint_in_trainer_tpu:
+          self.checkpointer = checkpointer.Checkpointer(self._train_dir,
+                                                        self._model)
+      self._initialize_tables = tf.tables_initializer()
       self._initialize_local_vars = tf.local_variables_initializer()
-
-      if FLAGS.checkpoint_in_trainer_tpu:
-        self.checkpointer = checkpointer.Checkpointer(self._train_dir,
-                                                      self._model)
 
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
       assert not tf.get_collection(py_utils.CLOSE_QUEUE_OPS)
@@ -809,7 +813,7 @@ class TrainerTpu(base_runner.BaseRunner):
           if self._tpu_embedding is not None else None)
       sess.run(
           tf.tpu.initialize_system(embedding_config=config_proto, job=None))
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       sess.run(self._initialize_local_vars)
       if FLAGS.run_locally == 'tpu':
         sess.run(tf.global_variables_initializer())
@@ -855,7 +859,8 @@ class TrainerTpu(base_runner.BaseRunner):
           sess.run(self._retrieve_ops)
           tf.logging.info('Retrieve params done.')
 
-        eval_metrics = self._eval_metrics.PackMetricsValues(values)
+        self._eval_metrics.PackMetricsValues(values)
+        eval_metrics = self._eval_metrics.metrics
 
         # Note: global_step is incremented by self._steps_per_loop by the
         # previous sess.run call.
@@ -868,11 +873,13 @@ class TrainerTpu(base_runner.BaseRunner):
         self._model.ProcessFPropResults(sess, global_step, eval_metrics,
                                         outfeeds)
 
-        step_rate, example_rate = self._step_rate_tracker.ComputeStepRate(
-            global_step,
-            eval_metrics['num_samples_in_batch'][0] * self._steps_per_loop)
+        step_rate, example_rate, total_examples = (
+            self._step_rate_tracker.ComputeStepRate(
+                global_step,
+                eval_metrics['num_samples_in_batch'][0] * self._steps_per_loop))
         self._SummarizeValue(global_step, 'global_step/sec', step_rate)
         self._SummarizeValue(global_step, 'examples/sec', example_rate)
+        self._SummarizeValue(global_step, 'total_samples', total_examples)
 
         msg = 'step:%6d, steps/sec: %0.2f, examples/sec: %0.2f' % (
             global_step, step_rate, example_rate)
@@ -956,7 +963,7 @@ class Evaler(base_runner.BaseRunner):
         # exactly the same.
         self._model.ConstructFPropGraph()
         self._model_task = self._model.GetTask(self._model_task_name)
-      self.initialize_tables = tf.tables_initializer()
+      self._initialize_tables = tf.tables_initializer()
       self._initialize_local_vars = tf.local_variables_initializer()
       # No queues are allowed for eval models.
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
@@ -980,7 +987,7 @@ class Evaler(base_runner.BaseRunner):
     """The main loop."""
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
 
@@ -1007,7 +1014,7 @@ class Evaler(base_runner.BaseRunner):
     """Runs eval once on the latest checkpoint."""
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
       path = tf.train.latest_checkpoint(self._train_dir)
@@ -1023,7 +1030,7 @@ class Evaler(base_runner.BaseRunner):
   def EvalCheckpoint(self, ckpt_id):
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
       path = '{}/ckpt-{:08d}'.format(self._train_dir, ckpt_id)
@@ -1158,11 +1165,12 @@ class Decoder(base_runner.BaseRunner):
 
         self._dec_output = self._model_task.Decode(input_batch)
         self._summary_op = tf.summary.merge_all()
-      self.initialize_tables = tf.tables_initializer()
+        self.checkpointer = self._CreateCheckpointer(self._train_dir,
+                                                     self._model)
+      self._initialize_tables = tf.tables_initializer()
       self._initialize_local_vars = tf.local_variables_initializer()
       # No queues are allowed for decoder models.
       self.enqueue_ops = tf.get_collection(py_utils.ENQUEUE_OPS)
-      self.checkpointer = self._CreateCheckpointer(self._train_dir, self._model)
       assert not self.enqueue_ops
 
     # Saves the graph def.
@@ -1182,7 +1190,7 @@ class Decoder(base_runner.BaseRunner):
     with tf.container(
         self._container_id), self._GetSession(inline=False) as sess:
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
 
@@ -1296,7 +1304,7 @@ class Decoder(base_runner.BaseRunner):
     """Runs decoder on the latest checkpoint."""
     with tf.container(self._container_id), self._GetSession() as sess:
       # This initializes local tables
-      sess.run(self.initialize_tables)
+      sess.run(self._initialize_tables)
       # This initializes local variables.
       sess.run(self._initialize_local_vars)
       path = tf.train.latest_checkpoint(self._train_dir)
@@ -1485,6 +1493,7 @@ class RunnerManager(object):
     cluster.mode = FLAGS.mode
     cluster.job = job_name
     cluster.task = FLAGS.task
+    cluster.do_eval = job_name in ['evaler', 'decoder']
 
     cluster.controller.name = FLAGS.controller_job
     cluster.controller.gpus_per_replica = FLAGS.controller_gpus
@@ -1516,6 +1525,8 @@ class RunnerManager(object):
     cluster.decoder.name = FLAGS.decoder_job
     cluster.decoder.replicas = FLAGS.decoder_replicas
     cluster.decoder.gpus_per_replica = FLAGS.decoder_gpus
+
+    cluster.add_summary = FLAGS.add_summary
 
   def _CreateRunner(self, job, model_task_name, logdir, tf_master, trial):
     """Create a runner."""
@@ -1594,24 +1605,28 @@ class RunnerManager(object):
     threads = []
     tf.logging.info('Starting runners')
     for runner in runners:
-      t = threading.Thread(target=runner.Start)
+      runner_class_name = str(runner)
+      t = threading.Thread(target=runner.Start, name=runner_class_name)
       t.daemon = True
       t.start()
       threads.append(t)
       if runner.enqueue_ops:
         tf.logging.info('Total num runner.enqueue_ops: %d',
                         len(runner.enqueue_ops))
-        for enqueue_op in runner.enqueue_ops:
+        for i, enqueue_op in enumerate(runner.enqueue_ops):
 
           def StartEnqueue(runner, op):
             tf.logging.info('Starting enqueue op %s', op.name)
             return lambda: runner.StartEnqueueOp(op)
 
-          tq = threading.Thread(target=StartEnqueue(runner, enqueue_op))
+          enqueue_name = '%s-enqueue-%d' % (runner_class_name, i)
+          tq = threading.Thread(
+              target=StartEnqueue(runner, enqueue_op), name=enqueue_name)
           tq.start()
           threads.append(tq)
     tf.logging.info('Waiting for runners to finish...')
     for t in threads:
+      tf.logging.info('Waiting for thread to finish: %s' % t.name)
       while True:
         t.join(1)
         if not t.isAlive():
@@ -1792,27 +1807,6 @@ class RunnerManager(object):
     """Start the process."""
     tf.logging.set_verbosity(tf.logging.INFO)
 
-    # First try to see whether the model has been fetched by lingvo
-    # model_imports already.
-    try:
-      model_cls = self.model_registry.GetClass(self._model_name)
-    except LookupError as e:
-      # Try importing the module path implicitly defined by FLAGS.model so we
-      # can register those models.
-      module_name = self._model_name.rpartition('.')[0]
-      try:
-        module_obj = importlib.import_module(module_name)
-      except ImportError:
-        warn_str = ('\n\nAlso, unable to import `%s` as '
-                    'an external params module.\n\n' % module_name)
-        raise LookupError(str(e) + warn_str)
-      tf.logging.info('Imported custom params: %s' % module_obj)
-      # Strip off 'params.'
-      self._model_name = self._model_name.replace('params.', '')
-      model_cls = self.model_registry.GetClass(self._model_name)
-      if model_cls is None:
-        raise e
-
     if FLAGS.mode == 'inspect_model':
       self.InspectModel()
       return
@@ -1842,8 +1836,7 @@ class RunnerManager(object):
 
     if FLAGS.job.startswith('evaler_once_'):
       # E.g., trainer --model=foo.bar.Model --logdir=...
-      # --brain_run_locally=true --run_locally=cpu --mode=sync
-      # --job=evaler_once_test@65200
+      # --run_locally=cpu --mode=sync --job=evaler_once_test@65200
       self.RunEvalerOnce()
       return
 

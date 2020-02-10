@@ -312,8 +312,8 @@ class BeamSearchHelper(base_layer.BaseLayer):
     (out_best_scores, out_cumulative_scores, out_scores, out_hyps,
      out_prev_hyps, out_done_hyps, out_atten_probs,
      all_done) = ops.beam_search_step(
-         bs_results.log_probs,
-         bs_results.atten_probs,
+         tf.cast(bs_results.log_probs, dtype=p.dtype),
+         tf.cast(bs_results.atten_probs, dtype=p.dtype),
          best_scores,
          cumulative_scores,
          in_scores,
@@ -666,7 +666,7 @@ class GreedySearchHelper(base_layer.BaseLayer):
 
     bs_results, new_other_states = pre_beam_search_step_callback(
         theta, encoder_outputs, step_ids, other_states, 1)  # num_hyps_per_beam
-    new_step_ids = tf.arg_max(bs_results.log_probs, 1)
+    new_step_ids = tf.math.argmax(bs_results.log_probs, 1)
     new_step_ids = tf.cast(new_step_ids, tf.int32)
     new_step_ids = tf.reshape(new_step_ids, tf.shape(step_ids))
     final_other_states = post_beam_search_step_callback(theta, encoder_outputs,

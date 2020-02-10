@@ -81,6 +81,7 @@ class BatchNormLayerTest(test_utils.TestCase):
       params.name = 'bn'
       params.dim = 2
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
+      params.add_stats_to_moving_average_variables = True
       layers.BatchNormLayer(params)
       bn_vars = tf.get_collection('BatchNormLayer_vars')
       bn_var_names = [x.name for x in bn_vars]
@@ -89,6 +90,8 @@ class BatchNormLayerTest(test_utils.TestCase):
           'bn/moving_variance/var:0'
       ]
       self.assertEqual(expected_var_names, bn_var_names)
+      self.assertEqual(['bn/moving_mean/var:0', 'bn/moving_variance/var:0'],
+                       [x.name for x in tf.moving_average_variables()])
 
   def testBatchNormLayerMoments(self):
     with self.session(use_gpu=True):
@@ -303,10 +306,10 @@ class ConvLayerTest(test_utils.TestCase):
                              'conv2/gamma/var:0']
       expected_conv1_modules = ['bbf_BatchNormLayer_conv1']
       expected_conv2_modules = ['bbf_BatchNormLayer_conv2']
-      self.assertEqual(expected_conv1_vars, conv1_variables)
-      self.assertEqual(expected_conv2_vars, conv2_variables)
-      self.assertEqual(expected_conv1_modules, conv1_submodules)
-      self.assertEqual(expected_conv2_modules, conv2_submodules)
+      self.assertCountEqual(expected_conv1_vars, conv1_variables)
+      self.assertCountEqual(expected_conv2_vars, conv2_variables)
+      self.assertCountEqual(expected_conv1_modules, conv1_submodules)
+      self.assertCountEqual(expected_conv2_modules, conv2_submodules)
 
   def testSeparableConv2DLayerConstruction(self):
     with self.session(use_gpu=True):
@@ -782,7 +785,7 @@ class ConvLayerTest(test_utils.TestCase):
     # pylint: enable=bad-whitespace
     actual = self._evalConvLayerFProp(strides=[1, 1], dilation_rate=[2, 2])
     print('testConvLayerWithDilationFProp actual = ', np.array_repr(actual))
-    self.assertAllClose(expected_output1, actual)
+    self.assertAllClose(expected_output1, actual, atol=1e-5)
 
   def testSeparableConv2DLayerWithDilationFProp(self):
     # pyformat: disable
@@ -1441,6 +1444,7 @@ class ProjectionLayerTest(test_utils.TestCase):
       params.name = 'proj'
       params.input_dim = 2
       params.output_dim = 3
+      params.batch_norm = True
       params.params_init = py_utils.WeightInit.Gaussian(0.1)
       layers.ProjectionLayer(params)
       proj_vars = tf.get_collection('ProjectionLayer_vars')
@@ -1662,6 +1666,7 @@ class ProjectionLayerTest(test_utils.TestCase):
       params.dtype = tf.float64
       params.input_dim = 3
       params.output_dim = 2
+      params.batch_norm = True
       params.params_init = py_utils.WeightInit.Gaussian(0.01)
 
       proj_layer = layers.ProjectionLayer(params)
@@ -3879,7 +3884,7 @@ class DeterministicDropoutTest(test_utils.TestCase, parameterized.TestCase):
       grads = py_utils.ComputeGradients(loss, py_utils.NestedMap(w=w))
       tf.global_variables_initializer().run()
       y_val = sess.run(y)
-      grads_val = sess.run(grads)['w'][1]
+      grads_val = sess.run(grads.w.grad)
       self.assertAllClose(y_val, grads_val)
 
 

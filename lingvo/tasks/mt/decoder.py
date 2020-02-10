@@ -191,8 +191,8 @@ class MTBaseDecoder(base_decoder.BaseBeamSearchDecoder):
               tf.cast(tf.reshape(tf.argmax(logits, 1), [-1]), tf.int32),
               tf.reshape(target_labels, [-1])), p.dtype)
       correct_next_preds = tf.reduce_sum(
-          correct_preds * tf.reshape(target_weights, [-1]))
-      num_preds = tf.reduce_sum(target_weights)
+          correct_preds * tf.reshape(tf.cast(target_weights, p.dtype), [-1]))
+      num_preds = tf.reduce_sum(tf.cast(target_weights, p.dtype))
       accuracy = tf.identity(
           correct_next_preds / num_preds,
           name='fraction_of_correct_next_step_preds')
@@ -640,8 +640,8 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
           theta.frnn_with_atten.atten, source_encs, source_encs,
           source_paddings)
       s_seq_len = tf.shape(source_encs)[0]
-      atten_context = tf.zeros(
-          [num_hyps, p.attention.source_dim], dtype=source_encs.dtype)
+      context_dim = tf.shape(source_encs)[2]
+      atten_context = tf.zeros([num_hyps, context_dim], dtype=source_encs.dtype)
       atten_states = self._atten.ZeroAttentionState(s_seq_len, num_hyps)
       atten_probs = tf.zeros([num_hyps, s_seq_len], dtype=source_encs.dtype)
     else:
@@ -656,7 +656,7 @@ class MTDecoderV1(MTBaseDecoder, quant_utils.QuantizableLayer):
        atten_states) = self._atten.ComputeContextVectorWithSource(
            theta.frnn_with_atten.atten,
            encoder_outputs.packed_src,
-           tf.zeros([num_hyps, p.rnn_cell_dim], dtype=p.dtype),
+           tf.zeros([num_hyps, p.rnn_cell_dim], dtype=py_utils.FPropDtype(p)),
            attention_state=zero_atten_state)
 
     assert atten_states is not None

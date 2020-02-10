@@ -19,7 +19,7 @@ config_setting(
 
 config_setting(
     name = "py3_mode",
-    values = {"force_python": "PY3"},
+    flag_values = {"@bazel_tools//tools/python:python_version": "PY3"},
 )
 
 py_library(
@@ -103,6 +103,7 @@ py_library(
         ":compat",
         "//lingvo/core:base_input_generator",
         "//lingvo/core:base_model",
+        "//lingvo/core:bn_layers",
         "//lingvo/core:py_utils",
         "//lingvo/core:test_utils",
     ],

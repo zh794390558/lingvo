@@ -20,15 +20,15 @@ This expects the caller to describe the recurrent neural net by specifying:
 
   - theta: the "weights" each RNN uses.
   - state0: the initial state of each RNN.
-  - cell_fn: A python function describing RNN cell. It must has the following
+  - cell_fn: A python function describing RNN cell. It must have the following
     signature::
 
         cell_fn: (theta, state0, inputs) -> (state1, extras)
 
     state1 is the next RNN state, extras are computed by cell_fn
     and the library forwards extras to cell_fn's gradient function.
-  - cell_grad: A python function describing the backprop gradient function
-    for the RNN cell. It must has the following signature::
+  - cell_grad: An optional python function describing the backprop gradient
+    function for the RNN cell. It must have the following signature::
 
         cell_grad: (theta, state0, inputs, extras, dstate1) ->
             (dtheta, dstate0, dinputs)
@@ -38,6 +38,46 @@ This expects the caller to describe the recurrent neural net by specifying:
 
 All of `theta`, `state0`, `inputs`, `extras` and `dstate1` are
 `.NestedMap` so that they can carry a bunch of tensors around.
+
+Recurrent computes, roughly::
+
+    state = state0
+    for t in inputs' sequence length:
+      state = cell_fn(theta, state, inputs[t, :])
+      accumulate_state[t, :] = state
+    return accumulate_state, state
+
+The main advantage to using Recurrent instead of tf.while_loop is in
+memory savings. In order to compute the gradient for cell_fn, a tf.while_loop
+implementation will try to save all of the intermediate tensor values in the
+forward pass. For long input sequences this can add up to a very large amount
+of memory space.
+
+Recurrent saves only the state output from cell_fn, not any of the intermediate
+tensors generated within cell_fn. This saves lots of memory in the forward
+pass, but there is a cost: we have to recompute those intermediate tensors
+in the backward pass in order to compute the gradient. This recomputation
+is why we require that cell_fn be stateless: Recurrent calls cell_fn both
+in the forward pass and in the backward pass, and both of those invocations
+need to be the same in order for training to work properly.
+
+When using Recurrent, then, we need to store state for the whole training
+sequence (in accumulate_state), as well as all of the intermediate tensors
+for a single step of cell_fn. Without Recurrent, we would store all of the
+intermediate tensors for all of the steps.
+
+We prefer that all of the inputs to cell_fn be passed in using theta, state0,
+or inputs. But sometimes you may have code with other inputs; for instance, this
+cell_fn references tensor my_tensor, even though it was never passed in as an
+input::
+
+    my_tensor = tf.constant(5)
+    def cell_fn(inputs):
+      return inputs.input * my_tensor
+
+We say that my_tensor was implicitly captured by cell_fn. By default,
+Recurrent doesn't allow this, but you can change that behavior by setting the
+allow_implicit_captures flag.
 """
 
 from __future__ import absolute_import
@@ -109,7 +149,7 @@ def _Update(nmap_acc, nmap_x, t):
   t = tf.cast([t], tf.int32)  # tf.cast casts on-device tensors.
   lst = []
   for acc, (key, x) in zip(acc_lst, kx_lst):
-    with tf.name_scope('update_%s' % key):
+    with tf.name_scope('update_%s' % py_utils.SanitizeScopeKey(key)):
       lst += [tf.InplaceUpdate(acc, t, tf.expand_dims(x, 0))]
   return nmap_acc.Pack(lst)
 
@@ -164,42 +204,6 @@ def _SeqPaddingLength(inputs_nmap):
       tf.equal(padding_end, time), 0,
       time - tf.reduce_max(mask_reverse * numbers))
   return [padding_begin, padding_end]
-
-
-def Flatten(nmap_list):
-  """Flattens every `.NestedMap` in nmap_list and concatenate them."""
-  ret = []
-  for x in nmap_list:
-    ret += x.Flatten()
-  return ret
-
-
-def Pack(flatten, nmap_list):
-  """Packs the list of tensors according to `.NestedMap` in `nmap_list`.
-
-  `Pack` is loosely the inverse of `Flatten`.
-
-  Args:
-    flatten: A list of tensors.
-    nmap_list: A list of `.NestedMap`.
-
-  Returns:
-    A list of `.NestedMap`, say ret is the returned list. We have
-
-      1. len(ret) == len(nmap_list);
-      2. recursively, ret[i] has the same keys as nmap_list[i];
-      3. Flatten(ret) == flatten;
-  """
-  if not isinstance(flatten, (list, tuple)):
-    flatten = [flatten]
-  ret = []
-  for x in nmap_list:
-    # x needs num values from the head of flatten.
-    num = len(x.Flatten())
-    ret += [x.Pack(flatten[:num])]
-    flatten = flatten[num:]
-  assert not flatten, ('flatten does not match nmap_list.')
-  return ret
 
 
 def _SetShapes(dst_nmap, src_nmap):
@@ -269,23 +273,12 @@ def _Add(nmap_x, nmap_y):
   Returns:
     A `.NestedMap` of tensors. ret.key = nmap_x.key + nmap_y.key for every key.
   """
-  _AssertIsCompatible(nmap_x, nmap_y)
-  x_lst = nmap_x.Flatten()
-  y_lst = nmap_y.Flatten()
-  z = []
-  for x, y in zip(x_lst, y_lst):
-    z += [tf.add(x, y)]
-  return nmap_x.Pack(z)
+  return py_utils.Transform(tf.add, nmap_x, nmap_y)
 
 
 def Dtypes(nmap_list):
   """Returns all tensors' data types in a list."""
-  flatten = []
-  for x in nmap_list:
-    for k, v in x.FlattenItems():
-      assert hasattr(v, 'dtype'), 'Non-tensor entry: %s=%s' % (k, v)
-    flatten += x.Flatten()
-  return [v.dtype for v in flatten]
+  return [v.dtype for v in py_utils.Flatten(nmap_list)]
 
 
 def _ConvertNoneGradientToZeros(xs, dxs):
@@ -298,18 +291,8 @@ def _ConvertNoneGradientToZeros(xs, dxs):
   Returns:
     A `.NestedMap` same as dxs with None replaced by a zero tensor.
   """
-  xs_lst = Flatten(xs)
-  dxs_lst = Flatten(dxs)
-
-  # If x does not get any backprop-ed gradient, propagate zeros.
-  rets = []
-  for (x, dx) in zip(xs_lst, dxs_lst):
-    if dx is None:
-      rets.append(tf.zeros_like(x))
-    else:
-      rets.append(dx)
-
-  return Pack(rets, dxs)
+  return py_utils.Transform(
+      lambda x, dx: tf.zeros_like(x) if dx is None else dx, xs, dxs)
 
 
 def _TransformDType(nmap):
@@ -394,12 +377,12 @@ class _Recurrent(object):
 
     @tf.Defun(*Dtypes(fwd_sig))
     def Fwd(*args):
-      (theta, state0, inputs) = Pack(args, fwd_sig)
+      (theta, state0, inputs) = py_utils.Pack(fwd_sig, args)
       _SetShapes(theta, fwd_sig[0])
       state1, extras = self._cell_fn(theta, state0, inputs)
       _AssertIsCompatible(state1, self._state)
       _AssertIsCompatible(extras, self._extras)
-      return Flatten([state1, extras])
+      return py_utils.Flatten([state1, extras])
 
     # Wraps cell_fn in a TF Function as a for-loop's body.
     #
@@ -420,7 +403,7 @@ class _Recurrent(object):
       """The condition of forward loop."""
       should_continue = t < limit
       if self._stop_fn:
-        theta, state0, _, _, _ = Pack(args, fwdloop_sig)
+        theta, state0, _, _, _ = py_utils.Pack(fwdloop_sig, args)
         should_continue = tf.logical_and(
             should_continue,
             tf.reduce_any(tf.logical_not(self._stop_fn(t, theta, state0))))
@@ -429,16 +412,18 @@ class _Recurrent(object):
     @tf.Defun(t_type, t_type, *Dtypes(fwdloop_sig))
     def ForwardLoopBody(t, limit, *args):
       """The body of forward loop."""
-      theta, state0, inputs, acc_state, acc_extras = Pack(args, fwdloop_sig)
+      theta, state0, inputs, acc_state, acc_extras = py_utils.Pack(
+          fwdloop_sig, args)
       inputs_t = _Index(inputs, t)  # external input at time step t.
-      state1, extras = Pack(
-          Fwd(*Flatten([theta, state0, inputs_t])), [self._state, self._extras])
+      state1, extras = py_utils.Pack(
+          [self._state, self._extras],
+          Fwd(*py_utils.Flatten([theta, state0, inputs_t])))
       # Saves state1 and extras in their accumulators.
       if not self._unused_acc_state:
         acc_state = _Update(acc_state, state1, t)
       acc_extras = _Update(acc_extras, extras, t)
 
-      return [tf.add(t, 1), limit] + Flatten(
+      return [tf.add(t, 1), limit] + py_utils.Flatten(
           [theta, state1, inputs, acc_state, acc_extras])
 
     def Grad(op, *args):
@@ -515,8 +500,7 @@ class _Recurrent(object):
       for i, dy in enumerate(args):
         if dy is None:
           args[i] = tf.zeros_like(op.outputs[i])
-      (theta, state0, inputs, _, unused_captured) = Pack(
-          [x for x in op.inputs],
+      (theta, state0, inputs, _, _) = py_utils.Pack(
           [
               self._theta,
               self._state,
@@ -524,19 +508,20 @@ class _Recurrent(object):
               self._extras,
               # Implicit captured tensors always come last
               self._implicit_captures,
-          ])
+          ],
+          [x for x in op.inputs])
       # acc_state and acc_extras are computed by the Forward pass and
       # needed by the Backward pass.
-      acc_state, _, acc_extras = Pack([x for x in op.outputs[1:]],
-                                      [self._state, self._state, self._extras])
+      acc_state, _, acc_extras = py_utils.Pack(
+          [self._state, self._state, self._extras], [x for x in op.outputs[1:]])
 
       # Forward computes acc_state, the final state and
       # acc_extras. tf.gradients gives us their gradients w.r.t. the
       # final loss. Because acc_extras are not exposed by Compute(),
       # it has no gradients w.r.t. the final loss (i.e., by
       # construction, it must be zeros).
-      d_acc_state, d_state1, _ = Pack(args[1:],
-                                      [self._state, self._state, self._extras])
+      d_acc_state, d_state1, _ = py_utils.Pack(
+          [self._state, self._state, self._extras], args[1:])
 
       if self._unused_acc_state:
         # XLA While op requires the same shape for the init and carry on values.
@@ -545,7 +530,7 @@ class _Recurrent(object):
 
       return Backward(
           op.outputs[0],
-          *Flatten([
+          *py_utils.Flatten([
               theta,
               state0,
               inputs,
@@ -567,7 +552,7 @@ class _Recurrent(object):
         _reference=constants.REFERENCE_ANNOTATION)
     def Forward(*args):
       """Forward pass of the recurrent net."""
-      theta, state0, inputs, extras = Pack(args, forward_sig)
+      theta, state0, inputs, extras = py_utils.Pack(forward_sig, args)
 
       # The sequence length.
       pad_begin, pad_end = _SeqPaddingLength(inputs)
@@ -588,16 +573,18 @@ class _Recurrent(object):
         t = tf.cast(pad_begin, tf.int64)
         limit = tf.cast(limit, tf.int64)
 
-      run = tf.While(
-          [t, limit] + Flatten([theta, state0, inputs, acc_state, acc_extras]),
-          cond=ForwardLoopCond,
-          body=ForwardLoopBody)
+      with py_utils.RemoveAssertContext(remove=noinline):
+        run = tf.While(
+            [t, limit] +
+            py_utils.Flatten([theta, state0, inputs, acc_state, acc_extras]),
+            cond=ForwardLoopCond,
+            body=ForwardLoopBody)
       t = run[0]
-      _, state1, _, acc_state, acc_extras = Pack(
-          run[2:],
-          [self._theta, self._state, self._inputs, self._state, self._extras])
+      _, state1, _, acc_state, acc_extras = py_utils.Pack(
+          [self._theta, self._state, self._inputs, self._state, self._extras],
+          run[2:])
 
-      return [t] + Flatten([acc_state, state1, acc_extras])
+      return [t] + py_utils.Flatten([acc_state, state1, acc_extras])
 
     # The per-step backward computes:
     #    d_theta, d_state0, d_inputs = cell_grad(
@@ -616,7 +603,7 @@ class _Recurrent(object):
     @tf.Defun(*Dtypes(bak_sig))
     def Bak(*args):
       """Backward step."""
-      (theta, state0, inputs, extras, d_state1) = Pack(args, bak_sig)
+      (theta, state0, inputs, extras, d_state1) = py_utils.Pack(bak_sig, args)
       _SetShapes(theta, bak_sig[0])
       (dtheta, dstate0, dinputs,
        dcaptures) = self._cell_grad(theta, state0, inputs, extras, d_state1)
@@ -635,8 +622,8 @@ class _Recurrent(object):
       # to cell_grad() which adds to the captured list.
       _AssertSameTensors(tf.GetExtraInputs(), self._implicit_captures.Flatten())
 
-      (captured,) = Pack(tf.GetExtraArgs(), [self._implicit_captures])
-      return Flatten(
+      captured = py_utils.Pack(self._implicit_captures, tf.GetExtraArgs())
+      return py_utils.Flatten(
           _ConvertNoneGradientToZeros([theta, state0, inputs, captured],
                                       [dtheta, dstate0, dinputs, dcaptures]))
 
@@ -646,13 +633,13 @@ class _Recurrent(object):
     @tf.Defun(*Dtypes(state_if_sig))
     def ReturnOrigState0(*args):
       """Returns original state0 from inputs."""
-      (_, orig_state0) = Pack(args, state_if_sig)
+      (_, orig_state0) = py_utils.Pack(state_if_sig, args)
       return orig_state0.Flatten()
 
     @tf.Defun(*Dtypes(state_if_sig))
     def ReturnAccState(*args):
       """Returns acc_state[t-1] from inputs."""
-      (acc_state, _) = Pack(args, state_if_sig)
+      (acc_state, _) = py_utils.Pack(state_if_sig, args)
       return acc_state.Flatten()
 
     # Wraps cell_grad gradient function in a TF Function as a
@@ -708,7 +695,7 @@ class _Recurrent(object):
           d_state1,
           d_inputs,
           d_acc_state,
-          d_captured) = Pack(args, bakloop_sig)
+          d_captured) = py_utils.Pack(bakloop_sig, args)
 
       # The input recurrent state for time step t is previous time step's
       # output, or the original state0 when on time step 0.
@@ -716,7 +703,7 @@ class _Recurrent(object):
                               tf.maximum(tf.constant(0, t.dtype), t - 1))
       state0 = tf.If(
           tf.equal(t, tf.constant(0, t.dtype)),
-          Flatten([state_from_acc, orig_state0]), ReturnOrigState0,
+          py_utils.Flatten([state_from_acc, orig_state0]), ReturnOrigState0,
           ReturnAccState)
       state0 = orig_state0.Pack(state0)
 
@@ -726,9 +713,9 @@ class _Recurrent(object):
       extras_t = _Index(acc_extras, t)
 
       d_state1 = _Add(_Index(d_acc_state, t), d_state1)
-      (d_theta_t, d_state0, d_inputs_t, d_captured_t) = Pack(
-          Bak(*Flatten([theta, state0, inputs_t, extras_t, d_state1])),
-          [self._theta, self._state, self._inputs, self._implicit_captures])
+      (d_theta_t, d_state0, d_inputs_t, d_captured_t) = py_utils.Pack(
+          [self._theta, self._state, self._inputs, self._implicit_captures],
+          Bak(*py_utils.Flatten([theta, state0, inputs_t, extras_t, d_state1])))
 
       if self._unused_acc_state:
         # XLA IF op requires the same shape for if and else branches.
@@ -742,7 +729,7 @@ class _Recurrent(object):
       # to Bak() which adds to the captured list.
       _AssertSameTensors(tf.GetExtraInputs(), self._implicit_captures.Flatten())
 
-      return [tf.subtract(t, 1), limit] + Flatten([
+      return [tf.subtract(t, 1), limit] + py_utils.Flatten([
           theta,
           orig_state0,
           inputs,
@@ -778,7 +765,7 @@ class _Recurrent(object):
       # d_acc_state is the gradient for acc_state.
       # d_state1 is the gradient for the final state computed by Forward.
       (theta, state0, inputs, acc_state, acc_extras, d_acc_state,
-       d_state1) = Pack(args, backward_sig)
+       d_state1) = py_utils.Pack(backward_sig, args)
 
       # Accumulators for gradients.
       d_theta = _EmptyLike(theta)
@@ -793,24 +780,25 @@ class _Recurrent(object):
         limit = tf.cast(limit, tf.int32)
       else:
         limit = tf.cast(limit, tf.int64)
-      run = tf.While(
-          [start - 1, limit] + Flatten([
-              theta,
-              state0,
-              inputs,
-              acc_state,
-              acc_extras,
-              d_theta,
-              d_state1,
-              d_inputs,
-              d_acc_state,
-              d_captured,
-          ]),
-          cond=BackwardLoopCond,
-          body=BackwardLoopBody)
+      with py_utils.RemoveAssertContext(remove=noinline):
+        run = tf.While(
+            [start - 1, limit] + py_utils.Flatten([
+                theta,
+                state0,
+                inputs,
+                acc_state,
+                acc_extras,
+                d_theta,
+                d_state1,
+                d_inputs,
+                d_acc_state,
+                d_captured,
+            ]),
+            cond=BackwardLoopCond,
+            body=BackwardLoopBody)
 
       (theta, state0, inputs, acc_state, acc_extras, d_theta, d_state0,
-       d_inputs, d_acc_state, d_captured) = Pack(run[2:], bakloop_sig)
+       d_inputs, d_acc_state, d_captured) = py_utils.Pack(bakloop_sig, run[2:])
 
       # Make sure this function didn't capture anything different than the
       # cell_fn when reflected on at the beginning. Must come after the
@@ -820,16 +808,17 @@ class _Recurrent(object):
       if self._unused_acc_state:
         # Match the shape of gradient of the init_state.
         d_state0 = self._state.Transform(tf.zeros_like)
-      return Flatten([d_theta, d_state0, d_inputs, acc_extras, d_captured])
+      return py_utils.Flatten(
+          [d_theta, d_state0, d_inputs, acc_extras, d_captured])
 
     self._forward = Forward
 
   def Compute(self):
     """Run the computation."""
-    run = self._forward(
-        *Flatten([self._theta, self._state, self._inputs, self._extras]))
-    acc_state, final_state = Pack(  # pylint: disable=unbalanced-tuple-unpacking
-        run[1:], [self._state, self._state, self._extras])[:2]
+    run = self._forward(*py_utils.Flatten(
+        [self._theta, self._state, self._inputs, self._extras]))
+    acc_state, final_state, _ = py_utils.Pack(
+        [self._state, self._state, self._extras], run[1:])
 
     if self._accumulator_layer:
       # Restore the accumulators from the final recurrent state.
@@ -878,10 +867,10 @@ def _ReflectOnCellFn(cell_fn,
 
   @tf.Defun(*Dtypes(fwd_sig))
   def Fwd(*args):
-    (theta, state0, inputs) = Pack(args, fwd_sig)
+    (theta, state0, inputs) = py_utils.Pack(fwd_sig, args)
     _SetShapes(theta, fwd_sig[0])
     state1, extras = cell_fn(theta, state0, inputs)
-    return Flatten([state1, extras])
+    return py_utils.Flatten([state1, extras])
 
   # Asserts about the function.
   if Fwd.stateful_ops:
@@ -897,14 +886,15 @@ def _ReflectOnCellFn(cell_fn,
           None, None, 'cell_fn depends on stateful random ops: {}'.format(
               stateful_random_ops))
 
+  ret = py_utils.NestedMap()
   captured_inputs = list(Fwd.captured_inputs)
-
-  assert (not captured_inputs or allow_implicit_capture), (
-      ('Recurrent cell_fn implicitly captures tensors but '
-       'implicit capture is disabled or a custom cell_grad fn '
-       'is in use. Captured tensors: %r') % captured_inputs)
-
-  return py_utils.NestedMap(captured=captured_inputs)
+  if captured_inputs:
+    if not allow_implicit_capture:
+      raise ValueError('Recurrent cell_fn implicitly captures tensors but '
+                       'implicit capture is disabled or a custom cell_grad fn '
+                       'is in use. Captured tensors: %r' % captured_inputs)
+    ret.captured = captured_inputs
+  return ret
 
 
 def _GetCellGrad(cell_fn,
@@ -962,14 +952,14 @@ def _GetCellGrad(cell_fn,
 
       # Extract the internal captured tensor placeholders within the Defun
       # we are running in.
-      (captured,) = Pack(tf.GetExtraArgs(), [implicit_captures])
-      ys = Flatten([state1])
-      xs = Flatten([theta, state0, inputs, captured])
-      grad_ys = Flatten([dstate1])
+      captured = py_utils.Pack(implicit_captures, tf.GetExtraArgs())
+      ys = py_utils.Flatten(state1)
+      xs = py_utils.Flatten([theta, state0, inputs, captured])
+      grad_ys = py_utils.Flatten(dstate1)
       grads = tf.gradients(ys=ys, xs=xs, grad_ys=grad_ys)
       return _ConvertNoneGradientToZeros(
           [theta, state0, inputs, captured],
-          Pack(grads, [theta, state0, inputs, captured]))
+          py_utils.Pack([theta, state0, inputs, captured], grads))
 
     cell_grad = CellGrad
 
@@ -1304,13 +1294,11 @@ class _Link(object):
 
 def _CreateLinks(nmap, dpair):
   """Creates links between the send/recv devices for every tensor in nmap."""
-  return nmap.Pack([_Link(t, dpair) for t in nmap.Flatten()])
+  return nmap.Transform(lambda t: _Link(t, dpair))
 
 
 def _Join(nmap_x, nmap_y, fn):
-  xs = nmap_x.Flatten()
-  ys = nmap_y.Flatten()
-  return [fn(x, y) for (x, y) in zip(xs, ys)]
+  return py_utils.Transform(fn, nmap_x, nmap_y).Flatten()
 
 
 class _Input(object):
@@ -1558,14 +1546,14 @@ def _DependsOn(xs, ys):
   #   first: x, list -> x
   #
   # If we have nil & first, we can write
-  #   zero = nil(Flatten(ys))
+  #   zero = nil(py_utils.Flatten(ys))
   #   return [x.Transform(lambda t: first(t, zero)) for x in xs]
   def MakeZero(x):
     s = tf.reduce_sum(x)
     return tf.cast(s - s, tf.float32)
 
   def SumToZero(nmap_list):
-    return tf.add_n([MakeZero(x) for x in Flatten(nmap_list)])
+    return tf.add_n([MakeZero(x) for x in py_utils.Flatten(nmap_list)])
 
   ys_zero = SumToZero(ys)
   return [x.Transform(lambda t: t + tf.cast(ys_zero, t.dtype)) for x in xs]
@@ -1807,7 +1795,7 @@ def StackedRecurrent(devices,
       # the Backward loop for each layer.
       #
       # TODO(zhifengc): We can write, if we have nil & first ops:
-      #   anchor += [nil(Flatten(acc_states))]
+      #   anchor += [nil(py_utils.Flatten(acc_states))]
       # And finally,
       #   return acc_states.Transform(lambda x: first(x, anchor))
       def ComputeAnchor(x):

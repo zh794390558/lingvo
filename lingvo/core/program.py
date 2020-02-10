@@ -84,8 +84,8 @@ class BaseProgram(object):
 
     # Program dirs are where the summaries are written to.
     if p.task_name:
-      program_dir_name = p.task_name + '_' + p.name + '_' + p.dataset_name.lower(
-      )
+      program_dir_name = (
+          p.task_name + '_' + p.name + '_' + p.dataset_name.lower())
     else:
       program_dir_name = p.name + '_' + p.dataset_name.lower()
     self._program_dir = os.path.join(self._logdir, program_dir_name)
@@ -109,10 +109,14 @@ class BaseProgram(object):
 
   def _InfeedLoop(self, sess):
     tf.logging.info('_InfeedLoop start')
-    for i in range(self._steps_per_loop):
-      tf.logging.vlog(1, '_InfeedLoop %d', i)
-      sess.run(self._model.GetTask().input_generator.tpu_infeed_op)
-    tf.logging.info('_InfeedLoop done')
+    try:
+      for i in range(self._steps_per_loop):
+        tf.logging.vlog(1, '_InfeedLoop %d', i)
+        sess.run(self._model.GetTask().input_generator.tpu_infeed_op)
+      tf.logging.info('_InfeedLoop done')
+    except Exception as e:
+      tf.logging.info('_InfeedLoop exception %r %s', e, e)
+      raise
 
   def BuildTpuSubgraph(self):
     """Sub classes should construct a model/graph to be executed by Run.
@@ -126,9 +130,12 @@ class BaseProgram(object):
     """Execute the program using the given session handle."""
     raise NotImplementedError()
 
+  def CreateCheckpointer(self):
+    self._checkpointer = checkpointer.Checkpointer(self._checkpoint_dir,
+                                                   self._model)
+
   def RestoreIfNeeded(self, sess):
-    """Restore from checkpoint if necessary."""
-    raise NotImplementedError()
+    self._checkpointer.RestoreIfNeeded(sess)
 
 
 class TrainProgram(BaseProgram):
@@ -143,9 +150,6 @@ class TrainProgram(BaseProgram):
   def __init__(self, params):
     super(TrainProgram, self).__init__(params)
     self._step_rate_tracker = summary_utils.StepRateTracker()
-
-  def _CreateCheckpointer(self, train_dir, model):
-    return checkpointer.Checkpointer(train_dir, model)
 
   def _OutfeedEnqueue(self, per_example_tensors):
     if not per_example_tensors:
@@ -276,12 +280,7 @@ class TrainProgram(BaseProgram):
       # Get metric result from a single replica; they are all same here.
       self.tpu_ops = [[t[0] for t in batch_parallel_res], outfeed_dequeue_op]
 
-      self._checkpointer = self._CreateCheckpointer(self._checkpoint_dir,
-                                                    self._model)
     return self.tpu_ops
-
-  def RestoreIfNeeded(self, sess):
-    self._checkpointer.RestoreIfNeeded(sess)
 
   def Run(self, sess):
     tf.logging.info('Executing train program for %s.', self._task_name)
@@ -295,14 +294,17 @@ class TrainProgram(BaseProgram):
     values = ary[0]
     outfeeds = ary[1]
 
-    eval_metrics = self._eval_metrics.PackMetricsValues(values)
+    self._eval_metrics.PackMetricsValues(values)
+    eval_metrics = self._eval_metrics.metrics
 
     global_step = sess.run(gsteps)
-    step_rate, example_rate = self._step_rate_tracker.ComputeStepRate(
-        global_step,
-        eval_metrics['num_samples_in_batch'][0] * self._steps_per_loop)
+    step_rate, example_rate, total_examples = (
+        self._step_rate_tracker.ComputeStepRate(
+            global_step,
+            eval_metrics['num_samples_in_batch'][0] * self._steps_per_loop))
     self._SummarizeValue(global_step, 'global_step/sec', step_rate)
     self._SummarizeValue(global_step, 'examples/sec', example_rate)
+    self._SummarizeValue(global_step, 'total_samples', total_examples)
 
     for key, (val, _) in sorted(six.iteritems(eval_metrics)):
       self._SummarizeValue(global_step, key, val)
@@ -358,13 +360,8 @@ class EvalProgram(BaseProgram):
           device_assignment=py_utils.GetTpuDeviceAssignment())
       # Get metric result from a single replica; they are all same here.
       self.tpu_ops = [[t[0] for t in batch_parallel_res]]
-      self._checkpointer = checkpointer.Checkpointer(self._checkpoint_dir,
-                                                     self._model)
 
       return self.tpu_ops
-
-  def RestoreIfNeeded(self, sess):
-    self._checkpointer.RestoreIfNeeded(sess)
 
   def Run(self, sess):
     tf.logging.info('Executing eval program for %s.', self._task_name)
@@ -374,9 +371,9 @@ class EvalProgram(BaseProgram):
     ary = sess.run(self.tpu_ops)
     infeed_future.wait()
     values = ary[0]
-    eval_metrics = self._eval_metrics.PackMetricsValues(values)
+    self._eval_metrics.PackMetricsValues(values)
     global_step = sess.run(gsteps)
-    for key, (val, _) in sorted(six.iteritems(eval_metrics)):
+    for key, (val, _) in sorted(six.iteritems(self._eval_metrics.metrics)):
       self._SummarizeValue(global_step, key, val)
 
 
@@ -418,15 +415,9 @@ class DecodeProgram(BaseProgram):
         num_shards=self.data_parallelism,
         device_assignment=py_utils.GetTpuDeviceAssignment())
 
-    self._checkpointer = checkpointer.Checkpointer(self._checkpoint_dir,
-                                                   self._model)
-
     self.metrics = py_utils.NestedMap(self.metrics_nm)
     self.metrics = self.metrics.Pack(batch_parallel_res)
     return None
-
-  def RestoreIfNeeded(self, sess):
-    self._checkpointer.RestoreIfNeeded(sess)
 
   def Run(self, sess):
     tf.logging.info('Executing decode program for %s.', self._task_name)

@@ -26,6 +26,7 @@ from lingvo.core import base_layer
 from lingvo.core import builder_layers
 from lingvo.core import bn_layers
 from lingvo.core import computation_cost
+from lingvo.core import constants
 from lingvo.core import conv_layers_with_time_padding
 from lingvo.core import py_utils
 from lingvo.core import quant_utils
@@ -857,7 +858,7 @@ class ProjectionLayer(quant_utils.QuantizableLayer):
         'activation', 'RELU',
         'Activation function to use. Options are RELU, RELU6, SIGMOID, '
         'TANH, NONE.')
-    p.Define('batch_norm', True, 'Whether or not to apply batch norm.')
+    p.Define('batch_norm', None, 'Whether or not to apply batch norm.')
     p.Define('has_bias', False,
              'Whether or not to introduce the bias params to the layer.')
     p.Define('bias_init', 0.0, 'Initial value for the bias')
@@ -892,6 +893,9 @@ class ProjectionLayer(quant_utils.QuantizableLayer):
     assert symbolic.EvalExpr(symbolic.STATIC_VALUES, p.input_dim) > 0
     assert symbolic.EvalExpr(symbolic.STATIC_VALUES, p.output_dim) > 0
     assert p.activation == 'NONE' or p.activation in _ACTIVATIONS
+    if p.batch_norm is None:
+      raise RuntimeError(
+          'ProjectionLayer.batch_norm not set explicitly for %s' % self.path)
     if p.batch_norm and p.has_bias:
       tf.logging.warning(
           'Projection layer enables both batch_norm and has_bias. '
@@ -2179,7 +2183,7 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
     # flags passed to @tf.Defun
     compiled = py_utils.use_xla()
 
-    @tf.Defun(p.dtype, tf.int32, p.dtype)
+    @tf.Defun(py_utils.FPropDtype(p), tf.int32, py_utils.FPropDtype(p))
     def EmbBprop(embs, ids_vec, drets):
       """Embedding backprop.
 
@@ -2203,12 +2207,13 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
       """
       del embs
       num = tf.shape(ids_vec)[0]
-      dembs = inplace_ops.empty(weight_shape, p.dtype, init=True)
+      dembs = inplace_ops.empty(weight_shape, py_utils.FPropDtype(p), init=True)
       if len(weight_shape) != 2:
         drets_shape = tf.shape(drets)
         drets = tf.reshape(drets, [drets_shape[0]] + emb_shape_suf)
 
-      @tf.Defun(tf.int32, tf.int32, p.dtype, p.dtype)
+      @tf.Defun(tf.int32, tf.int32, py_utils.FPropDtype(p),
+                py_utils.FPropDtype(p))
       def EmbBpropLoop(i, ids_vec, drets, dembs):
         # row_id = ids_vec[i]
         row_id = tf.gather(ids_vec, i)
@@ -2227,7 +2232,12 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
           rewrite_with_while=compiled)
       return dembs, tf.zeros_like(ids_vec)
 
-    @tf.Defun(p.dtype, tf.int32, grad_func=EmbBprop)
+    @tf.Defun(
+        py_utils.FPropDtype(p),
+        tf.int32,
+        grad_func=EmbBprop,
+        _implements=self.layer_type + '.EmbFProp',
+        _reference=constants.REFERENCE_ANNOTATION)
     def EmbFprop(embs, ids_vec):
       """Embedding forward prop.
 
@@ -2247,9 +2257,10 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
         [num ids in ids_vec, embedding dims].
       """
       num = tf.shape(ids_vec)[0]
-      rets = inplace_ops.empty([num] + emb_shape_suf, p.dtype)
+      rets = inplace_ops.empty([num] + emb_shape_suf, py_utils.FPropDtype(p))
 
-      @tf.Defun(tf.int32, p.dtype, tf.int32, p.dtype)
+      @tf.Defun(tf.int32, py_utils.FPropDtype(p), tf.int32,
+                py_utils.FPropDtype(p))
       def EmbFpropLoop(i, embs, ids_vec, rets):
         # row_id = ids_vec[i]
         row_id = tf.gather(ids_vec, i)
@@ -2270,7 +2281,13 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
         rets = tf.reshape(rets, [num, symbolic.ToStatic(p.embedding_dim)])
       return rets
 
+    @tf.Defun(
+        py_utils.FPropDtype(p),
+        tf.int32,
+        _implements=self.layer_type + '.EmbMatmul',
+        _reference=constants.REFERENCE_ANNOTATION)
     def EmbMatmul(embs, ids_vec):
+      """Lookups embedding vectors by doing Matmul with one-hot vector."""
       # lhs[i, j] is True iff ids_vec[i] == j.
       lhs = tf.equal(
           tf.expand_dims(ids_vec, 1),
@@ -2278,6 +2295,7 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
       return tf.matmul(tf.cast(lhs, embs.dtype), embs)
 
     def EmbGather(embs, ids_vec):
+      """Lookups embedding vectors."""
       return tf.nn.embedding_lookup(embs, ids_vec)
 
     if self._fprop_mode == 'matmul':
@@ -2313,6 +2331,12 @@ class SimpleEmbeddingLayer(quant_utils.QuantizableLayer):
       A rank-(N+1) params.dtype tensor.
       embs[indices, :] is the embedding vector for ids[indices].
     """
+    if not isinstance(ids, tf.Tensor):
+      tf.logging.warning('ids should be a tf.Tensor!')
+      ids = tf.convert_to_tensor(ids, tf.int32)
+    elif ids.dtype != tf.int32:
+      tf.logging.warning('ids should be tf.int32, but is %s!', ids.dtype)
+      ids = tf.cast(ids, tf.int32)
     p = self.params
     if not py_utils.use_xla():
       ids = py_utils.with_dependencies(
@@ -3002,11 +3026,13 @@ class SingleShardFullSoftmax(SoftmaxLayer):
     chunk_size = p.chunk_size
     num_chunks = batch_size // chunk_size
 
-    num_chunks = py_utils.with_dependencies(
-        [tf.assert_equal(0, tf.mod(batch_size, chunk_size),
-                         summarize=2,
-                         message='assert_equal')],
-        num_chunks)
+    num_chunks = py_utils.with_dependencies([
+        py_utils.assert_equal(
+            0,
+            tf.mod(batch_size, chunk_size),
+            summarize=2,
+            message='assert_equal')
+    ], num_chunks)
 
     def ReshapeX(x):
       if x is None:

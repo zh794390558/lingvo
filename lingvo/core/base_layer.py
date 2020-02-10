@@ -200,14 +200,9 @@ class BaseLayer(tf.Module):
         'params_init', py_utils.DefaultParamInit(),
         'How model weights should be initialized. Not to be confused with '
         'hyperparams.')
-    # is_eval is used to generate graph for eval purpose, typically
-    # the eval graph is forward pass of training graph without
-    # regularization, e.g. dropout.
-    p.Define('is_eval', None, 'True if in eval mode.')
-    # In addition to is_eval, also makes additional alterations for graphs
-    # being used for inference.
+    # Makes additional alterations for graphs being used for inference.
     p.Define('is_inference', None, 'True if in inference mode.')
-    # In addition to is_eval/is_inference, indicate that the inference graph is
+    # In addition to is_inference, indicate that the inference graph is
     # for a single step.
     p.Define(
         'allow_implicit_capture', None,
@@ -315,18 +310,6 @@ class BaseLayer(tf.Module):
     self._var_symbolic_shape_map = dict()
 
     self.AddExtraTheta('global_step', py_utils.GetGlobalStep())
-
-  def FPropNestedMap(self, theta, input_map):
-    """Forward propagation where input and output are both single NestedMap's.
-
-    Args:
-      theta: A `.NestedMap` object containing weights' values of this
-        layer and its children layers.
-      input_map: A NestedMap containing input to this function.
-    Returns:
-      A single NestedMap of output.
-    """
-    raise NotImplementedError(type(self))
 
   def FPropDefaultTheta(self, *args, **kwargs):
     """Calls `FProp`."""

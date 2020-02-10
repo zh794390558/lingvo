@@ -2,8 +2,12 @@
 #
 # LINGVO_DIR="/tmp/lingvo"  # (change to the cloned lingvo directory, e.g. "$HOME/lingvo")
 # LINGVO_DEVICE="gpu"  # (Leave empty to build and run CPU only docker)
-# sudo docker build --tag tensorflow:lingvo $(test "$LINGVO_DEVICE" = "gpu" && echo "--build-arg base_image=nvidia/cuda:10.0-cudnn7-runtime-ubuntu18.04") - < lingvo/docker/dev.dockerfile
-# sudo docker run --rm $(test "$LINGVO_DEVICE" = "gpu" && echo "--runtime=nvidia") -it -v ${LINGVO_DIR}:/tmp/lingvo -v ${HOME}/.gitconfig:/home/${USER}/.gitconfig:ro -p 6006:6006 -p 8888:8888 --name lingvo tensorflow:lingvo bash
+# docker build --tag tensorflow:lingvo $(test "$LINGVO_DEVICE" = "gpu" && echo "--build-arg base_image=nvidia/cuda:10.0-cudnn7-runtime-ubuntu18.04") - < "$LINGVO_DIR/docker/dev.dockerfile"
+# docker run --rm $(test "$LINGVO_DEVICE" = "gpu" && echo "--runtime=nvidia") -it -v ${LINGVO_DIR}:/tmp/lingvo -v ${HOME}/.gitconfig:/home/${USER}/.gitconfig:ro -p 6006:6006 -p 8888:8888 --name lingvo tensorflow:lingvo bash
+# 
+# Test that everything worked:
+#
+# bazel test -c opt --test_output=streamed //lingvo:trainer_test //lingvo:models_test
 
 ARG cpu_base_image="ubuntu:18.04"
 ARG base_image=$cpu_base_image
@@ -54,8 +58,10 @@ RUN mkdir /bazel && \
     cd / && \
     rm -f /bazel/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh
 
-ARG pip_dependencies='contextlib2 \
-      Pillow \
+ARG pip_dependencies=' \
+      apache-beam[gcp]>=2.8 \
+      contextlib2 \
+      google-api-python-client \
       h5py \
       ipykernel \
       jupyter \
@@ -63,7 +69,10 @@ ARG pip_dependencies='contextlib2 \
       matplotlib \
       model-pruning-google-research \
       numpy \
+      oauth2client \
       pandas \
+      Pillow \
+      pyyaml \
       recommonmark \
       scikit-learn==0.20.3 \
       scipy \
@@ -71,26 +80,19 @@ ARG pip_dependencies='contextlib2 \
       sphinx \
       sphinx_rtd_theme \
       sympy \
-      google-api-python-client \
-      oauth2client \
-      apache-beam[gcp]>=2.8'
+      waymo-open-dataset-tf-2-1-0'
 
 RUN pip3 --no-cache-dir install $pip_dependencies && \
     python3 -m ipykernel.kernelspec
 
-RUN jupyter serverextension enable --py jupyter_http_over_ws
-
 # The latest tensorflow requires CUDA 10 compatible nvidia drivers (410.xx).
 # If you are unable to update your drivers, an alternative is to compile
-# TensorFlow from source instead of installing from pip.
+# tensorflow from source instead of installing from pip.
+# Ensure we install the correct version by uninstalling first.
+RUN pip3 uninstall -y tensorflow tensorflow-gpu tf-nightly tf-nightly-gpu
 RUN pip3 --no-cache-dir install tensorflow-gpu
 
-# Install pip packages that may depend on TensorFlow.
-
-# Because this image uses tf2, we install a special
-# version of waymo-open-dataset.
-ARG post_tf_pip_dependencies='waymo-open-dataset-2-0-0'
-RUN pip3 --no-cache-dir install $post_tf_pip_dependencies
+RUN jupyter serverextension enable --py jupyter_http_over_ws
 
 # bazel assumes the python executable is "python".
 RUN ln -s /usr/bin/python3 /usr/bin/python

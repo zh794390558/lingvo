@@ -185,7 +185,7 @@ lingvo_cc_binary(
     srcs = ["generate_proto_def.cc"],
     deps = [
         # Implicit proto dependency.
-        # Implicit tensorflow proto dependency.
+        # Implicit tensorflow C++ proto dependency.
     ],
 )
 

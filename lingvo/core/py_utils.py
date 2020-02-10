@@ -1,6 +1,5 @@
 # Lint as: python2, python3
 # -*- coding: utf-8 -*-
-# Lint as: python2, python3
 # Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -51,7 +50,6 @@ from tensorflow.python.tpu import tpu_function
 from tensorflow.python.util import deprecation
 # pylint: enable=g-direct-tensorflow-import
 
-
 tf.flags.DEFINE_bool('enable_asserts', True,
                      'If False, we disable all asserts.')
 
@@ -63,8 +61,6 @@ tf.flags.DEFINE_bool('print_debug_tensors', False,
 
 tf.flags.DEFINE_string(
     'xla_device', '', 'If non-empty, can be cpu, gpu, or tpu (case sensitive)')
-
-tf.flags.DEFINE_bool('nas_run', False, 'If True, this is a NAS training run.')
 
 tf.flags.DEFINE_bool(
     'use_resource_var', False,
@@ -90,7 +86,45 @@ tf.flags.DEFINE_bool(
     'variable handles directly for weight-sharing / multi-core '
     'inference on TPUs.')
 
+# NOTE: Using absl flags in libraries are frowned upon for several reasons:
+#
+# 1) They require app.run() or explicit flag parsing, preventing the use of
+# these libraries in environments that don't look like normal binaries (colab
+# notebooks).
+#
+# 2) They are process-level globals that cannot be scoped or configured except
+# once during binary startup.
+#
+# Because py_utils is a library, no more flags should be used in this file; the
+# existing flags are present for backwards compatibility.  Instead, consider
+# using a stack-scoped configuration object such as the Cluster object. We guard
+# against issue 1 above by using _FromGlobal below, which uses the default value
+# of the FLAG even if flags are unparsed.
+
 FLAGS = tf.flags.FLAGS
+
+
+def _FromGlobal(field_name):
+  """Get 'field_name' from a global configuration object.
+
+  Currently the global configuration object used is FLAGS, but this may
+  change to Cluster() or an equivalent stack-scoped config object.
+
+  Args:
+    field_name: The string field name to look up.
+
+  Returns:
+    The value associated with the global configuration string 'field_name'.
+  """
+  # TODO(b/145831327): check the field name in the current cluster object.
+  # If explicitly set, use that value instead of using the FLAG value.
+
+  # Now check the FLAGS object for backwards compatibility.
+  #
+  # If not explicitly set, get the field from the FLAGS object.  If FLAGS
+  # have not been parsed yet, the default value of the flag will be used.
+  return FLAGS[field_name].value
+
 
 ENQUEUE_OPS = '__lingvo_enqueue_ops'
 CLOSE_QUEUE_OPS = '__lingvo_close_queue_ops'
@@ -107,42 +141,42 @@ deprecation._PRINT_DEPRECATION_WARNINGS = False
 
 
 def Assert(condition, data, *args, **kwargs):
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return tf.Assert(condition, data, *args, **kwargs)
   else:
     return tf.no_op()
 
 
 def assert_equal(*args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return tf.assert_equal(*args, **kwargs)
   else:
     return tf.no_op()
 
 
 def assert_greater_equal(*args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return tf.assert_greater_equal(*args, **kwargs)
   else:
     return tf.no_op()
 
 
 def assert_greater(*args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return tf.assert_greater(*args, **kwargs)
   else:
     return tf.no_op()
 
 
 def assert_less_equal(*args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return tf.assert_less_equal(*args, **kwargs)
   else:
     return tf.no_op()
 
 
 def assert_less(*args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return tf.assert_less(*args, **kwargs)
   else:
     return tf.no_op()
@@ -155,7 +189,7 @@ def assert_between(x, l, r, *args, **kwargs):  # pylint: disable=invalid-name
 
 
 def assert_shape_match(*args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     filepath, line, func, _ = traceback.extract_stack(limit=3)[-2]
     kwargs['msg'] = 'LINGVO ASSERT %s:%s(%s)' % (re.sub(
         r'.*/', '', filepath), line, func)
@@ -165,10 +199,26 @@ def assert_shape_match(*args, **kwargs):  # pylint: disable=invalid-name
 
 
 def assert_same_dim0(xs, *args, **kwargs):  # pylint: disable=invalid-name
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return ops.assert_same_dim0(xs, *args, **kwargs)
   else:
     return tf.no_op()
+
+
+def assert_even_divide(denorm, num):  # pylint: disable=invalid-name
+  """Asserts that denorm is evenly divided by num."""
+  denorm = tf.convert_to_tensor(denorm)
+  num = tf.convert_to_tensor(num)
+
+  if denorm.dtype not in (tf.int32, tf.int64):
+    raise ValueError('denorminator.dtype is not tf.int32 or tf.int64.')
+  if num.dtype not in (tf.int32, tf.int64):
+    raise ValueError('numerator.dtype is not tf.int32 or tf.int64.')
+
+  num = HasShape(num, GetShape(denorm))
+
+  quo = denorm // num
+  return assert_equal(quo * num, denorm)
 
 
 def _CheckNumerics(x, message=None, *args, **kwargs):
@@ -182,7 +232,7 @@ def _CheckNumerics(x, message=None, *args, **kwargs):
 
 def CheckNumerics(inp, message=None, *args, **kwargs):
   """Check numerics for tensors in inp."""
-  if not FLAGS.enable_check_numerics:
+  if not _FromGlobal('enable_check_numerics'):
     return inp
   if isinstance(inp, list):
     return [_CheckNumerics(x, message, *args, **kwargs) for x in inp]
@@ -278,7 +328,7 @@ def HasRank(tensor, expected_rank):
         'Ranks did not match, got %d, '
         'expected %d') % (tensor.shape.ndims, expected_rank)
     return tensor
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     return with_dependencies([tf.assert_equal(tf.rank(tensor), expected_rank)],
                              tensor)
   else:
@@ -314,7 +364,7 @@ def HasShape(tensor, expected_shape, ndims=None):
   Raises:
     A runtime error if the assertion fails.
   """
-  if FLAGS.enable_asserts:
+  if _FromGlobal('enable_asserts'):
     filepath, line, func, _ = traceback.extract_stack(limit=3)[-2]
     msg = 'LINGVO ASSERT %s:%s(%s)' % (re.sub(r'.*/', '',
                                                  filepath), line, func)
@@ -361,36 +411,54 @@ def GetShape(tensor, ndims=None):
   return shapes
 
 
+def GetSize(tensor):
+  shape = GetShape(tensor)
+  if isinstance(shape, tf.Tensor):
+    return tf.size(tensor)
+
+  prod = 1
+  for d in shape:
+    prod = prod * d
+  return prod
+
+
 def use_xla():  # pylint: disable=invalid-name
-  res = FLAGS.xla_device
+  res = _FromGlobal('xla_device')
   if res:
-    assert FLAGS.xla_device in ('', 'cpu', 'gpu', 'tpu')
+    assert res in ('', 'cpu', 'gpu', 'tpu')
   return res
 
 
 def use_tpu():  # pylint: disable=invalid-name
-  res = FLAGS.xla_device == 'tpu'
+  res = _FromGlobal('xla_device') == 'tpu'
   if res:
-    assert not FLAGS.enable_asserts  # asserts not supported on tpu
+    assert not _FromGlobal('enable_asserts')  # asserts not supported on tpu
   return res
 
 
-def nas_run():  # pylint: disable=invalid-name
-  return FLAGS.nas_run
-
-
 def tpu_compat():  # pylint: disable=invalid-name
-  return use_tpu() or FLAGS.tpu_compatible
+  return use_tpu() or _FromGlobal('tpu_compatible')
 
 
 def use_resource_variables():  # pylint: disable=invalid-name
-  return FLAGS.use_resource_var or tpu_compat()
+  return _FromGlobal('use_resource_var') or tpu_compat()
 
 
 @contextlib.contextmanager
 def outside_all_rewrites():  # pylint: disable=invalid-name
   with tf.control_dependencies(None):
     yield
+
+
+class _ThreadLocalStack(threading.local):
+
+  def __init__(self):
+    super(_ThreadLocalStack, self).__init__()
+    self.stack = []
+
+
+# TODO(jamesqin): remove once b/147439702 is fixed.
+_OUTSIDE_COMPILATION = threading.local()
 
 
 def RunOnTpuHost(func, *args, **kwargs):
@@ -400,14 +468,43 @@ def RunOnTpuHost(func, *args, **kwargs):
 
   Args:
     func: the function to invoke.
+    *args: args of func
+    **kwargs: kwargs of func
 
   Returns:
     The function return value.
   """
-  if use_tpu():
-    return tf.tpu.outside_compilation(func, *args, **kwargs)
+  if use_tpu() and not getattr(_OUTSIDE_COMPILATION, 'on', False):
+    _OUTSIDE_COMPILATION.on = True
+    res = tf.tpu.outside_compilation(func, *args, **kwargs)
+    _OUTSIDE_COMPILATION.on = False
   else:
-    return func(*args, **kwargs)
+    res = func(*args, **kwargs)
+  return res
+
+
+def tpu_host(func):  # pylint: disable=invalid-name
+  r"""Decorates a python function to only run on TPU hosts.
+
+  This function has no effect when running on CPU/GPU.
+
+  Example::
+
+    @py_utils.tpu_host()
+    def ComputeWER(self):
+      # Call a custom op computing WER.
+
+  Args:
+    func: the function to invoke
+
+  Returns:
+    A TPU-host only function
+  """
+
+  def Wrapped(*args, **kwargs):
+    return RunOnTpuHost(func, *args, **kwargs)
+
+  return Wrapped
 
 
 _tpu_device_assignment = None
@@ -454,67 +551,28 @@ def SessionConfig(soft_placement=True, inline=True, cluster_def=None):
   return session_config
 
 
-def Transform(v, fn):
-  """Replaces every nested value x in 'v' with fn(x) and returns the result."""
-  if isinstance(v, list):
-    lst = [Transform(x, fn) for x in v]
-    return type(v)(lst)
-  elif isinstance(v, dict):
-    keys = sorted(v.keys())
-    values = [Transform(v[k], fn) for k in keys]
-    return type(v)(zip(keys, values))
-  else:
-    return fn(v)
+def Flatten(x):
+  """Flattens 'x' by extracting tensors from nested structures to a list."""
+  return tf.nest.flatten(x)
 
 
 def Pack(tmpl, values):
   """Packs 'values' according to 'tmpl'."""
-  values = list(values)
-  flat_tmpl = Flatten(tmpl)
-  assert len(flat_tmpl) == len(values)
-  v_iter = iter(values)
-  # Replace tensors in 'tmpl' with 'values'.
-  return Transform(tmpl, lambda _: next(v_iter))
+  return tf.nest.pack_sequence_as(tmpl, values)
 
 
-def Flatten(x):
-  """Flattens 'x' by extracting tensors from nested structures to a list."""
-  if isinstance(x, list):
-    flat_x = []
-    for v in x:
-      flat_x += Flatten(v)
-    return flat_x
-  elif isinstance(x, dict):
-    keys = sorted(x.keys())
-    return Flatten([x[k] for k in keys])
-  else:
-    return [x]
+def Transform(fn, *v):
+  """Replaces every nested value x in 'v' with fn(x) and returns the result."""
+  return tf.nest.map_structure(fn, *v)
 
 
 def IsCompatible(lhs, rhs):
   """Returns true if lhs and rhs are compatible."""
-
-  def DoCompare(x, y):
-    """Compares x and y."""
-    if isinstance(x, NestedMap) or isinstance(y, NestedMap):
-      if not isinstance(x, NestedMap) or not isinstance(y, NestedMap):
-        return False
-      if sorted(x.keys()) != sorted(y.keys()):
-        return False
-      for (k, v) in six.iteritems(x):
-        if not DoCompare(v, y[k]):
-          return False
-    elif isinstance(x, list) or isinstance(y, list):
-      if not isinstance(x, list) or not isinstance(y, list):
-        return False
-      if len(x) != len(y):
-        return False
-      for (u, v) in zip(x, y):
-        if not DoCompare(u, v):
-          return False
+  try:
+    tf.nest.assert_same_structure(lhs, rhs)
     return True
-
-  return DoCompare(lhs, rhs)
+  except (ValueError, TypeError):
+    return False
 
 
 _NAME_PATTERN = re.compile('[A-Za-z_][A-Za-z0-9_]*')
@@ -539,6 +597,8 @@ class NestedMap(dict):
   _HAS_DYNAMIC_ATTRIBUTES = True
   # keys in this list are not allowed in a NestedMap.
   _RESERVED_KEYS = set(dir(dict))
+  # sentinel value for deleting keys used in Filter.
+  _DELETE = object()
 
   def __init__(self, *args, **kwargs):
     super(NestedMap, self).__init__(*args, **kwargs)
@@ -585,8 +645,7 @@ class NestedMap(dict):
 
   def DeepCopy(self):
     """Deep-copies the structure but not the leaf objects."""
-    flat_v = self.Flatten()
-    return self.Pack(flat_v)
+    return self.Pack(self.Flatten())
 
   @staticmethod
   def FromNestedDict(a_dict):
@@ -603,37 +662,6 @@ class NestedMap(dict):
   def CheckKey(key):
     """Asserts that key is valid NestedMap key."""
     assert isinstance(key, six.string_types) and _NAME_PATTERN.match(key), key
-
-  def Flatten(self):
-    """Flatten the `.NestedMap` and returns values in a list."""
-    return Flatten(self)
-
-  def FlattenItems(self):
-    """Flatten the `.NestedMap` and returns <key, value> pairs in a list.
-
-    For lists, keys will be returned with `_<idx>` appended, e.g. `x.y_10.z`.
-
-    Returns:
-      A list of <key, value> pairs, where keys for nested entries will be
-      represented in the form of `foo.bar`.
-    """
-
-    def Expand(key, v):
-      if isinstance(v, NestedMap):
-        ret = []
-        for k in sorted(v.keys()):
-          global_key = key + '.' + k if key else k
-          ret += Expand(global_key, v[k])
-        return ret
-      elif isinstance(v, list):
-        ret = []
-        for i, x in enumerate(v):
-          ret += Expand('%s_%d' % (key, i), x)
-        return ret
-      else:
-        return [(key, v)]
-
-    return Expand(None, self)
 
   def GetItem(self, key):
     """Gets the value for the nested `key`.
@@ -711,21 +739,110 @@ class NestedMap(dict):
                            ''.format(key, k, type(current[k])))
         current = current[k]
 
+  def _RecursiveMap(self, fn, flatten=False):
+    """Traverse recursively into lists and NestedMaps applying `fn`.
+
+    Args:
+      fn: The function to apply to each item (leaf node).
+      flatten: If true, the result should be a single flat list. Otherwise the
+        result will have the same structure as this NestedMap.
+
+    Returns:
+      The result of applying fn.
+    """
+
+    def Recurse(v, key=''):
+      """Helper function for _RecursiveMap."""
+      if isinstance(v, NestedMap):
+        ret = [] if flatten else NestedMap()
+        deleted = False
+        for k in sorted(v.keys()):
+          res = Recurse(v[k], key + '.' + k if key else k)
+          if res is self._DELETE:
+            deleted = True
+            continue
+          elif flatten:
+            ret += res
+          else:
+            ret[k] = res
+        if not ret and deleted:
+          return self._DELETE
+        return ret
+      elif isinstance(v, list):
+        ret = []
+        deleted = False
+        for i, x in enumerate(v):
+          res = Recurse(x, '%s[%d]' % (key, i))
+          if res is self._DELETE:
+            deleted = True
+            continue
+          elif flatten:
+            ret += res
+          else:
+            ret.append(res)
+        if not ret and deleted:
+          return self._DELETE
+        return ret
+      else:
+        ret = fn(key, v)
+        if flatten:
+          ret = [ret]
+        return ret
+
+    res = Recurse(self)
+    if res is self._DELETE:
+      return [] if flatten else NestedMap()
+    return res
+
+  def Flatten(self):
+    """Returns a list containing the flattened values in the `.NestedMap`.
+
+    Unlike py_utils.Flatten(), this will only descend into lists and NestedMaps
+    and not dicts, tuples, or namedtuples.
+    """
+    return self._RecursiveMap(lambda _, v: v, flatten=True)
+
+  def FlattenItems(self):
+    """Flatten the `.NestedMap` and returns <key, value> pairs in a list.
+
+    Returns:
+      A list of <key, value> pairs, where keys for nested entries will be
+      represented in the form of `foo.bar[10].baz`.
+    """
+    return self._RecursiveMap(lambda k, v: (k, v), flatten=True)
+
+  def Pack(self, lst):
+    """Returns a copy of this with each value replaced by a value in lst."""
+    assert len(self.FlattenItems()) == len(lst)
+    v_iter = iter(lst)
+    return self._RecursiveMap(lambda unused_k, unused_v: next(v_iter))
+
   def Transform(self, fn):
     """Returns a copy of this `.NestedMap` with fn applied on each value."""
-    return Transform(self, fn)
+    return self._RecursiveMap(lambda _, v: fn(v))
+
+  def IsCompatible(self, other):
+    """Returns true if self and other are compatible.
+
+    If x and y are two compatible `.NestedMap`, `x.Pack(y.Flatten())` produces y
+    and vice versa.
+
+    Args:
+      other: Another `.NestedMap`.
+    """
+    items = self._RecursiveMap(lambda k, _: k, flatten=True)
+    other_items = other._RecursiveMap(lambda k, _: k, flatten=True)  # pylint: disable=protected-access
+    return items == other_items
 
   def Filter(self, fn):
-    """Returns a copy of this `.NestedMap` with entries that fn(entry) is True."""
+    """Returns a copy with entries where fn(entry) is True."""
     return self.FilterKeyVal(lambda _, v: fn(v))
 
   def FilterKeyVal(self, fn):
-    """Returns a copy of this `.NestedMap` with filtered by fn.
+    """Returns a copy of this `.NestedMap` filtered by fn.
 
     If fn(key, entry) is True, the entry is copied into the returned NestedMap.
     Otherwise, it is not copied.
-    For lists, keys will be processed with indices, e.g. `x.y[10].z`.
-    This is different from FlattenItems.
 
     Args:
       fn: a callable of (string, entry)->boolean.
@@ -733,69 +850,11 @@ class NestedMap(dict):
     Returns:
       A `.NestedMap` contains copied entries from this `'.NestedMap`.
     """
-
-    def DoFilter(prefix, value):
-      """Recursively copy value with the filter fn applied."""
-      if isinstance(value, NestedMap):
-        ret = NestedMap()
-        for k in sorted(value.keys()):
-          v = value[k]
-          if prefix:
-            key = '%s.%s' % (prefix, k)
-          else:
-            key = k
-          filtered = DoFilter(key, v)
-          if filtered is not None:
-            ret[k] = filtered
-        return ret if len(ret) else None
-      elif isinstance(value, list):
-        lst = []
-        for i, x in enumerate(value):
-          filtered = DoFilter('%s[%d]' % (prefix, i), x)
-          if filtered is not None:
-            lst += [filtered]
-        return lst if lst else None
-      elif fn(prefix, value):
-        return value
-      else:
-        return None
-
-    return DoFilter('', self)
-
-  def Pack(self, lst):
-    """Returns a copy of this with each value replaced by a value in lst."""
-    return Pack(self, lst)
-
-  def IsCompatible(self, other):
-    """Returns true if self and other are compatible.
-
-    Args:
-      other: Another `.NestedMap`.  If x and y are two compatible `.NestedMap`,
-        `x.Pack(y.Flatten())` produces y and `y.Pack(x.Flatten())` produces x.
-    """
-    return IsCompatible(self, other)
+    return self._RecursiveMap(lambda k, v: v if fn(k, v) else self._DELETE)
 
   def _ToStrings(self):
     """Returns debug strings in a list for this `.NestedMap`."""
-
-    def Print(prefix, value):
-      """Recursively walk value."""
-      ret = []
-      if isinstance(value, NestedMap):
-        for k, v in six.iteritems(value):
-          if prefix:
-            key = '%s.%s' % (prefix, k)
-          else:
-            key = k
-          ret += Print(key, v)
-      elif isinstance(value, list):
-        for i, x in enumerate(value):
-          ret += Print('%s[%d]' % (prefix, i), x)
-      else:
-        ret += [(prefix, value)]
-      return ret
-
-    kv = Print('', self)
+    kv = self.FlattenItems()
     maxlen = max([len(k) for k, _ in kv]) if kv else 0
     return sorted([k + ' ' * (4 + maxlen - len(k)) + str(v) for k, v in kv])
 
@@ -1130,7 +1189,7 @@ def FindNeeded(endpoints):
   """List names of tensors and operations required to compute endpoints."""
   names_seen = set()
   queue = []
-  for e in tf.nest.flatten(endpoints):
+  for e in Flatten(endpoints):
     if isinstance(e, tf.Operation):
       queue.append(e)
     else:
@@ -1167,6 +1226,11 @@ class _CollectionGetter(object):
     value = self._default_factory()
     tf.add_to_collection(self._key, value)
     return value
+
+
+def SanitizeScopeKey(key):
+  """Removes invalid symbols from name_scope keys."""
+  return key.replace('[', '_').replace(']', '')
 
 
 # Global variable to control multitask variable reuse
@@ -1256,14 +1320,6 @@ _ALL_VARS_KEY = ('__lingvo_all_vars',)
 
 _get_all_vars = _CollectionGetter(_ALL_VARS_KEY, lambda: {})
 
-
-class _ThreadLocalStack(threading.local):
-
-  def __init__(self):
-    super(_ThreadLocalStack, self).__init__()
-    self.stack = []
-
-
 _VARIABLE_SHAPE_PREFIXES = _ThreadLocalStack().stack
 
 
@@ -1313,7 +1369,9 @@ def CreateVariable(name,
                    trainable=True,
                    init_wrapper=None,
                    collections=None,
-                   default_seed=None):
+                   default_seed=None,
+                   synchronization=tf.VariableSynchronization.AUTO,
+                   aggregation=tf.VariableAggregation.NONE):
   """Creates tf.Variable according to param_config.
 
   Args:
@@ -1330,6 +1388,12 @@ def CreateVariable(name,
       tf.GraphKeys.GLOBAL_VARIABLES).
     default_seed: Seed to use for initialization if not specified in params.
       Used for deterministic initialization in tests.
+    synchronization: Indicates when a distributed a variable will be aggregated.
+      Accepted values are constants defined in the class
+      tf.VariableSynchronization. By default the synchronization is set to AUTO
+      and the current DistributionStrategy chooses when to synchronize.
+    aggregation: Indicates how a distributed variable will be aggregated.
+      Accepted values are constants defined in the class tf.VariableAggregation.
 
   Returns:
     tf.identity(var), var pair. The tf.identity() node is colocated
@@ -1480,7 +1544,7 @@ def CreateVariable(name,
           use_resource=scope.use_resource or use_resource_variables())
     with tf.variable_scope(var_scope), \
         tf.variable_scope(var_name, reuse=reuse) as scope:
-      if FLAGS.pin_vars_to_cpu:
+      if _FromGlobal('pin_vars_to_cpu'):
         with tf.device('/cpu:0'):
           return tf.get_variable(
               'var',
@@ -1489,7 +1553,9 @@ def CreateVariable(name,
               v_init,
               collections=collections,
               trainable=trainable,
-              validate_shape=True if var_shape is not None else False)
+              validate_shape=True if var_shape is not None else False,
+              synchronization=synchronization,
+              aggregation=aggregation)
       else:
         return tf.get_variable(
             'var',
@@ -1498,7 +1564,9 @@ def CreateVariable(name,
             v_init,
             collections=collections,
             trainable=trainable,
-            validate_shape=True if var_shape is not None else False)
+            validate_shape=True if var_shape is not None else False,
+            synchronization=synchronization,
+            aggregation=aggregation)
 
   if _get_opportunistic_variable_reuse()[0]:
     try:
@@ -1522,7 +1590,7 @@ def CreateVariable(name,
     for col in p.collections:
       tf.add_to_collection(col, var)
 
-  if FLAGS.no_identity_on_vars:
+  if _FromGlobal('no_identity_on_vars'):
     with tf.device(var.device):
       return var, var
   else:
@@ -1855,9 +1923,9 @@ def _ComputeGradientsTpuNas(loss, all_vars, grad_aggregation_method,
         # Note(yonghui): gradient of a weight param can be all zero if that
         # weight param is not used in the forward computation, e.g. as in
         # switchable layers in neural architecture search.
-        zero_threashold = 1e-8
+        zero_threshold = 1e-8
         g_is_non_zero = tf.cast(
-            tf.reduce_sum(tf.math.abs(g)) > zero_threashold, g.dtype)
+            tf.reduce_sum(tf.math.abs(g)) > zero_threshold, g.dtype)
         num_updates = tf.maximum(tf.tpu.cross_replica_sum(g_is_non_zero), 1.0)
         normalized_g = tf.tpu.cross_replica_sum(g) / num_updates
         aggregated_grads.append(normalized_g)
@@ -1866,13 +1934,35 @@ def _ComputeGradientsTpuNas(loss, all_vars, grad_aggregation_method,
   return aggregated_grads
 
 
+class VarGrad(object):
+  """A class that holds a variable and a gradient."""
+
+  _VAR_GRAD = py_collections.namedtuple('VarGradNamedTuple', ['var', 'grad'])
+
+  def __init__(self, *args, **kwargs):
+    self._var_grad = self._VAR_GRAD(*args, **kwargs)
+
+  def __getitem__(self, key):
+    return self._var_grad[key]
+
+  def __getattr__(self, key):
+    return getattr(self._var_grad, key)
+
+  def __iter__(self):
+    return iter(self._var_grad)
+
+  def __repr__(self):
+    return 'VarGrad(%r, %r)' % (self._var_grad.var, self._var_grad.grad)
+
+
 def ComputeGradients(
     loss,
     vmap,
     grad_aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE,
     colocate_gradients_with_ops=True,
     gate_gradients=False,
-    compute_gradients_fn=None):
+    compute_gradients_fn=None,
+    skip_zero_gradients=False):
   """Computes gradients of variables in vmap w.r.t loss.
 
   Args:
@@ -1885,12 +1975,16 @@ def ComputeGradients(
       corresponding op.
     gate_gradients: If True, add a tuple around the gradients returned for an
       operations. This avoids some race conditions.
-    compute_gradients_fn: Function to use to compute gradients. If None,
-      use default. compute_gradients_fn should have the same signature as
-      this function, but without the last argument.
+    compute_gradients_fn: Function to use to compute gradients. If None, use
+      default. compute_gradients_fn should have the same signature as this
+      function, but without the last argument.
+    skip_zero_gradients: Whether to skip aggregating zero gradients. This helps
+      in case where some weights may not be used in forward computation, e.g.,
+      sparsely activated networks or switchable layers in neural architectural
+      search.
 
   Returns:
-    var_grad - a `.NestedMap` of (variable, gradient). You can view
+    var_grad - a `.NestedMap` of VarGrad. You can view
     var_grad as an ordered list of (key, (var, grad)) tuples. Every
     key of var_grad exists in vmap. Every variable in vmap that
     contributes to loss must exist in var_grad. Every var of var_grad
@@ -1928,7 +2022,7 @@ def ComputeGradients(
   else:
     # tpu vs non-tpu is slightly different.
     if use_tpu():
-      if nas_run():
+      if skip_zero_gradients:
         take_grad = _ComputeGradientsTpuNas
       else:
         take_grad = _ComputeGradientsTpu
@@ -1940,13 +2034,14 @@ def ComputeGradients(
 
   # Formulate pairs of (var, grad) and pack them into the same
   # structure as filtered_vmap.
-  var_grad = filtered_vmap.Pack(list(zip(filtered_vlist, grads)))
+  var_grads = filtered_vmap.Pack(
+      [VarGrad(v, g) for v, g in zip(filtered_vlist, grads)])
 
   # Removes pairs whose grad is None.
-  for key, (_, g) in var_grad.FlattenItems():
+  for key, (_, g) in var_grads.FlattenItems():
     if g is None:
       tf.logging.info('ComputeGradients drops %s', key)
-  return var_grad.Filter(lambda v_g: v_g[1] is not None)
+  return var_grads.Filter(lambda var_grad: var_grad.grad is not None)
 
 
 def MaskGradients(var_grad, grad_mask):
@@ -1964,18 +2059,18 @@ def MaskGradients(var_grad, grad_mask):
     var, grad = entry
     mask = grad_mask[var.name]
     if isinstance(grad, tf.IndexedSlices):
-      return (var, tf.IndexedSlices(grad.values * mask, grad.indices))
+      return VarGrad(var, tf.IndexedSlices(grad.values * mask, grad.indices))
     else:
-      return (var, grad * mask)
+      return VarGrad(var, grad * mask)
 
   return var_grad.Transform(ApplyMask)
 
 
-def ApplyGradMultiplier(vs_gs_scale, grad_scale=None):
+def ApplyGradMultiplier(vs_gs, grad_scale=None):
   """Scale gradients by grad_scale on same device as corresponding variables.
 
   Args:
-    vs_gs_scale: A `.NestedMap` of (variable, gradient, scale).
+    vs_gs: A `.NestedMap` of VarGrad.
     grad_scale: If None, each vs_gs entry has the scale. Otherwise, grad_scale
       applies to every entry.
 
@@ -1984,10 +2079,6 @@ def ApplyGradMultiplier(vs_gs_scale, grad_scale=None):
     grad_scale is 0, the result gradient is always 0, even if the input
     gradient is inf or nan.
   """
-
-  if grad_scale is not None:
-    vs_gs_scale = vs_gs_scale.Transform(lambda vg: (vg[0], vg[1], grad_scale))
-
   def ScaleOrZero(var, grad, scale):
     grad = CheckNumerics(grad, 'Gradient for %s is not finite.' % var.name)
     return tf.where(
@@ -1996,8 +2087,12 @@ def ApplyGradMultiplier(vs_gs_scale, grad_scale=None):
 
   def Scale(item):
     """Scales the gradient."""
-    var, grad, scale = item
+    var, grad = item
     assert grad is not None, ('No grad found for ', var.name)
+    if grad_scale is None:
+      scale = item.scale
+    else:
+      scale = grad_scale
     with tf.device(var.device):
       if isinstance(grad, tf.IndexedSlices):
         grad = tf.IndexedSlices(
@@ -2005,9 +2100,9 @@ def ApplyGradMultiplier(vs_gs_scale, grad_scale=None):
             grad.dense_shape)
       else:
         grad = ScaleOrZero(var, grad, scale)
-    return (var, grad)
+    return VarGrad(var, grad)
 
-  return vs_gs_scale.Transform(Scale)
+  return vs_gs.Transform(Scale)
 
 
 def HasNanOrInfGradient(var_grads):
@@ -2031,28 +2126,26 @@ def HasNanOrInfGradient(var_grads):
   return tf.reduce_any([HasNanOrInf(g) for (_, g) in var_grads.Flatten()])
 
 
-def ApplyGradNormCliping(vs_gs, norm=1.0):
+def ApplyGradNormClipping(vs_gs, norm=1.0):
   """Clip gradients to norm on same device as corresponding variables.
 
   Args:
-    vs_gs: A `.NestedMap` of (variable, gradient).
+    vs_gs: A `.NestedMap` of VarGrad.
     norm: Each tensor's gradient will be scaled down to have a maximum L2-norm
       value of `norm`.
 
   Returns:
-    A `.NestedMap` of (variable, scaled_gradient). In particular, if
+    A `.NestedMap` of VarGrad(variable, scaled_gradient). In particular, if
     grad_scale is 0, the result gradient is always 0, even if the input
     gradient is inf or nan.
   """
-  vs_gs_norm = vs_gs.Transform(lambda v_g: (v_g[0], v_g[1], norm))
-
   def ClipByNorm(var, grad, norm):
     grad = CheckNumerics(grad, 'Gradient for %s is not finite.' % var.name)
     return tf.clip_by_norm(grad, norm)
 
   def Clip(item):
     """Scales the gradient."""
-    var, grad, norm = item
+    var, grad = item
     assert grad is not None, ('No grad found for ', var.name)
     with tf.device(var.device):
       if isinstance(grad, tf.IndexedSlices):
@@ -2060,9 +2153,9 @@ def ApplyGradNormCliping(vs_gs, norm=1.0):
             ClipByNorm(var, grad.values, norm), grad.indices, grad.dense_shape)
       else:
         grad = ClipByNorm(var, grad, norm)
-    return (var, grad)
+    return VarGrad(var, grad)
 
-  return vs_gs_norm.Transform(Clip)
+  return vs_gs.Transform(Clip)
 
 
 SKIP_LP_REGULARIZATION = '__lingvo_skip_lp_regularization'
@@ -2100,9 +2193,10 @@ def AdjustGradientsWithLpLoss(var_grads, lp_regularizer_weight, p=2.0):
   def ShouldAdjust(v):
     return v not in tf.get_collection(SKIP_LP_REGULARIZATION)
 
-  filtered_var_grads = [(v, g) for v, g in Flatten(var_grads) if ShouldAdjust(v)
-                       ]
-  filtered_vars = [GetVar(v_g) for v_g in filtered_var_grads]
+  filtered_var_grads = [
+      var_grad for var_grad in Flatten(var_grads) if ShouldAdjust(var_grad.var)
+  ]
+  filtered_vars = Transform(GetVar, filtered_var_grads)
   for v in filtered_vars:
     tf.logging.info('AdjustGradientsWithLpLoss: %s', v)
 
@@ -2111,9 +2205,9 @@ def AdjustGradientsWithLpLoss(var_grads, lp_regularizer_weight, p=2.0):
   elif p == 1.0:
     lp_loss = lp_regularizer_weight * SumAbs(filtered_vars)
 
-  def LpGrad(item):
+  def LpGrad(var_grad):
     """Adjusts item's grad w/ Lp loss term."""
-    var, grad = item
+    var, grad = var_grad
     if isinstance(grad, tf.IndexedSlices):
       # Question(rpang): do we apply Lp loss here even if 'var' is in
       # SKIP_LP_REGULARIZATION?
@@ -2156,9 +2250,9 @@ def AdjustGradientsWithLpLoss(var_grads, lp_regularizer_weight, p=2.0):
         delta = lp_regularizer_weight * grad_v
       with tf.device(grad.device):
         grad += delta
-    return (var, grad)
+    return VarGrad(var, grad)
 
-  return lp_loss, Transform(var_grads, LpGrad)
+  return lp_loss, Transform(LpGrad, var_grads)
 
 
 def SplitRecursively(x, num_splits, axis=-1):
@@ -2671,7 +2765,7 @@ def AddDebugTensor(tensor, summarize=None, name=None):
   Returns:
     A Tensor that evaluates to the same value as the input tensor.
   """
-  if FLAGS.print_debug_tensors:
+  if _FromGlobal('print_debug_tensors'):
     step = _GetSampleStep()
     tensors_to_print = ([] if step is None else [step]) + [tensor]
     with tf.name_scope(name) as s:
@@ -2804,6 +2898,45 @@ def PadSequenceDimension(x, length, pad_val, shape=None):
   return x
 
 
+def PadSequenceTo(xs, padding, length, pad_val):
+  """Pads `xs` and `padding` to `length` using `pad_val` along the 2nd dim.
+
+  Pads `xs` to `length` using `pad_val`, and `padding` using 1.
+  Raise error if `x.shape[:2]` and `padding.shape` are not the same.
+
+  Args:
+    xs: A Tensor or a list of Tensors of shape [batch, seqlen] or [batch,
+      seqlen, ...].
+    padding: A 0/1 Tensor of shape [batch, seqlen]. 1 is for padded locations.
+    length: A Python int, the length to pad to.
+    pad_val: A Python numeric, used for padding x.
+
+  Returns:
+    A tuple of padded xs and padding.
+  """
+  if not isinstance(xs, (list, tuple)):
+    new_xs = [xs]
+  else:
+    new_xs = xs
+
+  res = []
+  for x in new_xs:
+    batch, slen = GetShape(x, 2)
+
+    padding = HasRank(padding, 2)
+    padding = HasShape(padding, [batch, slen])
+
+    new_x = PadSequenceDimension(x, length, pad_val)
+    res.append(new_x)
+  padding = PadSequenceDimension(padding, length, tf.cast(1, padding.dtype))
+
+  if not isinstance(xs, (list, tuple)):
+    assert len(res) == 1
+    return res[0], padding
+  else:
+    return tuple(res), padding
+
+
 def ApplyPadding(padding, x, padded=None, broadcast=True, use_select=True):
   """Applies padding to a tensor.
 
@@ -2930,7 +3063,7 @@ def ReversePaddedSequence(inputs, paddings):
   return tf.reverse_sequence(inputs, inputs_length, seq_axis=0, batch_axis=1)
 
 
-def ConcatenatePadddedSequences(input0, input1, padding0, padding1, seq_dim=1):
+def ConcatenatePaddedSequences(input0, input1, padding0, padding1, seq_dim=1):
   """Concatenates input sequences with varying lenghts as defined by paddings.
 
   This is a helper function for concatenating 2 batches of input sequences,
@@ -3104,7 +3237,7 @@ def StackTensorsRecursively(values):
   return ret
 
 
-def MixByWeight(inputs, weights):
+def MixByWeight(inputs, weights, seed=None):
   """Returns a weighted random choice and bprop type from the give inputs.
 
   Args:
@@ -3115,6 +3248,7 @@ def MixByWeight(inputs, weights):
       represents an input record stream, a record will be drawn only from a
       selected stream while the other streams will remain unchanged.
     weights: a 1D tensor of float > 0 of the same length as inputs.
+    seed: random seed.
 
   Returns:
     A probablistic sample from the inputs proportional to the weights. The
@@ -3130,7 +3264,7 @@ def MixByWeight(inputs, weights):
 
   lower = tf.cumsum(weights, exclusive=True)
   upper = tf.cumsum(weights, exclusive=False)
-  r = tf.random_uniform(shape=[], maxval=upper[-1])
+  r = tf.random_uniform(shape=[], maxval=upper[-1], seed=seed)
   return_input = tf.case(
       [(tf.logical_and(lower[i] <= r, r < upper[i]), inputs[i])
        for i in range(len(inputs))],
@@ -3156,18 +3290,36 @@ def FPropDtype(params):
 
 def UpdateFpropDtype(params, fprop_dtype):
   """Recursively update the fprop_dtype of the Params."""
+  # Handle the case when the input "params" is not an instance of hyperparams
+  # For example, when UpdateDtype is called recursively for all the items in
+  # the "sub" list of SequentialLayer (see 1st elif below)
+  if not isinstance(params, hyperparams.Params):
+    return
+
   for key, val in params.IterParams():
     if isinstance(val, hyperparams.Params):
       UpdateFpropDtype(val, fprop_dtype)
+    elif isinstance(val, (list, tuple)):
+      for item in val:
+        UpdateFpropDtype(item, fprop_dtype)
     elif key == 'fprop_dtype':
       params.fprop_dtype = fprop_dtype
 
 
 def UpdateDtype(params, dtype):
   """Recursively update the dtype of the Params."""
+  # Handle the case when the input "params" is not an instance of hyperparams
+  # For example, when UpdateDtype is called recursively for all the items in
+  # the "sub" list of SequentialLayer (see 1st elif below)
+  if not isinstance(params, hyperparams.Params):
+    return
+
   for key, val in params.IterParams():
     if isinstance(val, hyperparams.Params):
       UpdateDtype(val, dtype)
+    elif isinstance(val, (list, tuple)):
+      for item in val:
+        UpdateDtype(item, dtype)
     elif key == 'dtype':
       params.dtype = dtype
 
@@ -3637,3 +3789,160 @@ def ProjectLastDim(inputs, weight, input_dim, output_dim):
                   axis=0))
 
   return outputs
+
+
+@contextlib.contextmanager
+def RemoveAssertContext(remove=True):
+  """Hacks to replace certain unwanted tensorflow ops."""
+  # TODO(zhifengc/huangyp): Consider implementing assert_equal
+  # op replacement for lingvo. As assert_equal doesn't support String on GPUs.
+  # Hack to replace tf.assert_equal
+  # TODO(b/136040013): Remove this after migration to tf.function.
+  if remove:
+    saved_assert_equal = tf.check_ops.assert_equal
+
+    # pylint: disable=unused-argument
+    def NoOP(*args, **kwargs):
+      return tf.no_op()
+
+    # pylint: enable=unused-argument
+    tf.check_ops.assert_equal = NoOP  # Make assert_equal a no op.
+    yield
+    tf.check_ops.assert_equal = saved_assert_equal
+  else:
+    yield
+
+
+def _DefineDefun(fwd, bak, args):
+  """Wraps fwd in a defun with custom gradient bak.
+
+  Args:
+    fwd: A callable xs: Nested Structure -> ys: Nested Structure.
+    bak: A callable xs, ys, dys: Nested Structure -> dxs: Nested Structure. The
+      custom backprop function for fwd.
+    args: A Nested Structure of tf.Tensor.
+
+  Returns:
+    A NestedMap w/ fields:
+      defun: A tf.Defun wraps fwd
+      args:  A Nested Structure of tf.DType
+      rets:  A Nested Structure of tf.DType
+  """
+  assert fwd is not None
+
+  # fwd signature (tf.Tensor dtypes).
+  get_dtype = lambda x: x.dtype
+  sigs = NestedMap(args=Transform(get_dtype, args))
+
+  get_shape = lambda x: x.shape
+  arg_shapes = Transform(get_shape, args)
+
+  compiled = use_xla()
+  noinline = not compiled
+
+  def Backward(op, *args):
+    assert bak is not None
+    xs = Pack(sigs.args, op.inputs)
+    # Note: sigs.rets will be set during the Forward call.
+    ys = Pack(sigs.rets, op.outputs)
+    dys = Pack(sigs.rets, args)
+    with RemoveAssertContext(remove=noinline):
+      dxs = bak(xs, ys, dys)
+    return Flatten(dxs)
+
+  @tf.Defun(*Flatten(sigs.args), python_grad_func=Backward, noinline=noinline)
+  def Forward(*args):
+    for arg, shape in zip(args, Flatten(arg_shapes)):
+      arg.set_shape(shape)
+    with RemoveAssertContext(remove=noinline):
+      rets = fwd(Pack(sigs.args, args))
+    sigs.rets = Transform(get_dtype, rets)
+    return Flatten(rets)
+
+  sigs.defun = Forward
+  return sigs
+
+
+def CallDefun(fwd, bak, args):
+  """Wraps fwd in a defun with custom gradient bak and calls it with args.
+
+  Args:
+    fwd: A callable xs: Nested Structure -> ys: Nested Structure.
+    bak: A callable xs, ys, dys: Nested Structure -> dxs: Nested Structure. The
+      custom backprop function for fwd.
+    args: A Nested Structure of tf.Tensor.
+
+  Returns:
+    A Nested Structure equivalent to what fwd(args) computes.
+  """
+  sigs = _DefineDefun(fwd, bak, args)
+  flat_rets = sigs.defun(*Flatten(args))
+  if not isinstance(flat_rets, (tuple, list)):
+    flat_rets = [flat_rets]
+  return Pack(sigs.rets, flat_rets)
+
+
+def _Itype():
+  """Loop iterator data type."""
+  return tf.int32 if use_xla() else tf.int64
+
+
+def WhileLoop(cond, body, loop_state):
+  """Helper to construct a while loop.
+
+  Args:
+    cond: A callable NestedMap -> tf.bool.
+    body: A callable NestedMap -> NestedMap.
+    loop_state: A flattenable (NestedMap, list, tuple, etc.) representing the
+      loop state.
+
+  Returns:
+    The final loop state in the same structure as loop_state.
+  """
+  state = NestedMap(loop_state=loop_state)
+  dtypes = state.Transform(lambda x: x.dtype).Flatten()
+
+  @tf.Defun(*dtypes)
+  def LoopCond(*args):
+    s = state.Pack(args)
+    return cond(s.loop_state)
+
+  @tf.Defun(*dtypes)
+  def LoopBody(*args):
+    s = state.Pack(args)
+    s.loop_state = body(s.loop_state)
+    return s.Flatten()
+
+  return state.Pack(
+      tf.While(input_=state.Flatten(), cond=LoopCond, body=LoopBody)).loop_state
+
+
+def ForLoop(body, start, limit, delta, loop_state):
+  """Helper to construct a for loop.
+
+  Args:
+    body: A callable (tf.int, NestedMap) -> NestedMap.
+    start: Loop variable's initial value.
+    limit: Loop variable's limit value.
+    delta: Loop variable's change per iteration.
+    loop_state: A flattenable (NestedMap, list, tuple, etc.) representing the
+      loop state.
+
+  Returns:
+    The final loop state in the same structure as loop_state.
+  """
+  state = NestedMap(
+      iter=tf.cast(start, _Itype()),
+      limit=tf.cast(limit, _Itype()),
+      delta=tf.cast(delta, _Itype()),
+      loop_state=loop_state)
+
+  def LoopCond(state):
+    return tf.less(state.iter, state.limit)
+
+  def LoopBody(state):
+    state.loop_state = body(state.iter, state.loop_state)
+    state.iter = tf.add(state.iter, state.delta)
+    return state
+
+  return WhileLoop(LoopCond, LoopBody, state).loop_state

@@ -732,6 +732,11 @@ class FRNNWithAttention(base_layer.BaseLayer):
         'If True, output previous attention context for each position.'
         'Otherwise, output current attention context.')
     p.Define(
+        'input_prev_atten_ctx', True,
+        'If True, concat previous attention context and user input as input.'
+        'Otherwise, this layer will still produce attention context but will '
+        'not use previous context as input.')
+    p.Define(
         'use_zero_atten_state', False,
         'To use zero attention state instead of computing attention with '
         'zero query vector.')
@@ -927,10 +932,13 @@ class FRNNWithAttention(base_layer.BaseLayer):
       else:
         state0_mod = state0
       state1 = py_utils.NestedMap()
-      if rcell.params.inputs_arity == 1:
-        act = [_ConcatLastDim(inputs.act, state0_mod.atten)]
+      if p.input_prev_atten_ctx:
+        if rcell.params.inputs_arity == 1:
+          act = [_ConcatLastDim(inputs.act, state0_mod.atten)]
+        else:
+          act = [inputs.act, state0_mod.atten]
       else:
-        act = [inputs.act, state0_mod.atten]
+        act = [inputs.act]
       state1.rnn, _ = rcell.FProp(
           theta.rnn, state0_mod.rnn,
           py_utils.NestedMap(
@@ -942,7 +950,8 @@ class FRNNWithAttention(base_layer.BaseLayer):
               theta.packed_src,
               rcell.GetOutput(state1.rnn),
               state0_mod.atten_state,
-              query_segment_id=tf.squeeze(inputs.segment_id, 1)))
+              query_segment_id=tf.cast(
+                  tf.squeeze(inputs.segment_id, 1), py_utils.FPropDtype(p))))
       return state1, py_utils.NestedMap()
 
     if p.packed_input:

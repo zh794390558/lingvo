@@ -40,6 +40,9 @@ from tensorflow.python.tpu import tpu_function
 # pylint: enable=g-direct-tensorflow-import
 
 
+DEFAULT_TOKENIZER_KEY = 'default'
+
+
 class BaseInputGenerator(base_layer.BaseLayer):
   """The abstract base input generator."""
 
@@ -461,6 +464,8 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
       else:
         raise ValueError('Cannot parse p.file_pattern into a datasource.')
 
+    self.CreateChild('datasource', p.file_datasource)
+
   def CommonInputOpArgs(self):
     """Common input params."""
     p = self.params
@@ -540,8 +545,7 @@ class BaseInputGeneratorFromFiles(BaseInputGenerator):
       ret = py_utils.NestedMap()
       ret.data = self._DataSourceFromFilePattern(p.file_pattern)
     else:
-      data_source = p.file_datasource.Instantiate()
-      ret = data_source.BuildDataSource(self._DataSourceFromFilePattern)
+      ret = self.datasource.BuildDataSource(self._DataSourceFromFilePattern)
     if 'selected_bprop' in ret:
       self._bprop_onehot = ret.selected_bprop
     if 'bprop_variable_filters' in ret:
@@ -605,8 +609,8 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
     self._input_batch_size = None
 
     if p.tokenizer:
-      assert 'default' not in p.tokenizer_dict
-      p.tokenizer_dict['default'] = p.tokenizer
+      assert DEFAULT_TOKENIZER_KEY not in p.tokenizer_dict
+      p.tokenizer_dict[DEFAULT_TOKENIZER_KEY] = p.tokenizer
 
     self.tokenizer_dict = {}
     for k, p in six.iteritems(p.tokenizer_dict):
@@ -617,8 +621,8 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
       else:
         self.tokenizer_dict[k] = None
 
-    if 'default' in self.tokenizer_dict:
-      self.tokenizer = self.tokenizer_dict['default']
+    if DEFAULT_TOKENIZER_KEY in self.tokenizer_dict:
+      self.tokenizer = self.tokenizer_dict[DEFAULT_TOKENIZER_KEY]
 
   @property  # Adjust batch size according to the cluster spec.
   def scaled_bucket_batch_limit(self):
@@ -703,7 +707,7 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
     else:
       maxlen = p.target_max_length
 
-    key = key or 'default'
+    key = key or DEFAULT_TOKENIZER_KEY
     return self.tokenizer_dict[key].StringsToIds(
         strs, maxlen, external_append_eos, languages=languages)
 
@@ -724,7 +728,7 @@ class BaseSequenceInputGenerator(BaseInputGeneratorFromFiles):
     Raises:
       ValueError: If unknown token type.
     """
-    key = key or 'default'
+    key = key or DEFAULT_TOKENIZER_KEY
     return self.tokenizer_dict[key].IdsToStrings(ids, lens)
 
   def Cast(self, v):
@@ -882,7 +886,7 @@ class BaseDataExampleInputGenerator(BaseInputGenerator):
       dataset = dataset.shuffle(p.randomize_shuffle_size)
     dataset = dataset.take(p.num_examples)
     dataset = dataset.repeat(p.num_epochs)
-    dataset = dataset.batch(p.batch_size, drop_remainder=True)
+    dataset = dataset.batch(self.InfeedBatchSize(), drop_remainder=True)
     dataset = dataset.map(
         ParseAndProcess, num_parallel_calls=p.parallel_readers)
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)

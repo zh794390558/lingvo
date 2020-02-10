@@ -67,6 +67,14 @@ class BatchNormLayer(base_layer.BaseLayer):
         'If True, use global moving avg (mean, variance) during training'
         ' to avoid mismatch between train and eval, which then'
         ' essentially acts as an adaptive normalization step.')
+    # TODO(rpang): remove this hparam, as it is replaced
+    # by p.train.ema_decay_moving_vars.
+    p.Define(
+        'add_stats_to_moving_average_variables', None,
+        'If True, adds (mean, variance) to the MOVING_AVERAGE_VARIABLES '
+        'collection to be compatible with ema_decay. '
+        'Recommendation: set to True for new models, and to False to maintain '
+        'checkpoint compatibility.')
     return p
 
   @base_layer.initializer
@@ -88,16 +96,31 @@ class BatchNormLayer(base_layer.BaseLayer):
         self.CreateVariable('gamma', pc, lambda x: 1.0 + x)
 
       # Two statistics.
-      _, self._moving_mean = py_utils.CreateVariable(
-          'moving_mean', pc, trainable=False)
+      moving_collections = ['moving_vars', self.__class__.__name__ + '_vars']
+      if p.add_stats_to_moving_average_variables:
+        moving_collections += [tf.GraphKeys.MOVING_AVERAGE_VARIABLES]
+      elif p.add_stats_to_moving_average_variables is None:
+        # TODO(rpang): force all models to set this param explicitly.
+        tf.logging.warn(
+            'BatchNormLayer.add_stats_to_moving_average_variables should be '
+            'set to True for new models, and to False explicitly for '
+            'checkpoint compatibility.')
+      # Add to the MOVING_AVERAGE_VARIABLES collection so that they are returned
+      # by tf.moving_average_variables() and included in EMA variables if
+      # ema_decay is enabled.
+      mva = py_utils.WeightParams(
+          shape=[p.dim],
+          init=py_utils.WeightInit.Constant(0.0),
+          dtype=p.dtype,
+          collections=moving_collections)
+      self.CreateVariable('moving_mean', mva, trainable=False)
 
-      pc = py_utils.WeightParams(
+      mvv = py_utils.WeightParams(
           shape=[p.dim],
           init=py_utils.WeightInit.Constant(1.0),
           dtype=p.dtype,
-          collections=[self.__class__.__name__ + '_vars'])
-      _, self._moving_variance = py_utils.CreateVariable(
-          'moving_variance', pc, trainable=False)
+          collections=moving_collections)
+      self.CreateVariable('moving_variance', mvv, trainable=False)
     self._epsilon = 0.001
     self._decay = p.decay
 
@@ -154,9 +177,10 @@ class BatchNormLayer(base_layer.BaseLayer):
     """
     p = self.params
     if p.use_moving_avg_in_training:
-      return self._moving_mean, self._moving_variance, 0.0, 1.0
+      return self.vars.moving_mean, self.vars.moving_variance, 0.0, 1.0
     else:
-      return self._moving_mean, self._moving_variance, theta.beta, theta.gamma
+      return (self.vars.moving_mean, self.vars.moving_variance, theta.beta,
+              theta.gamma)
 
   def ComputeAndUpdateMoments(self, theta, inputs, paddings=None):
     """Computes moments and updates state.
@@ -180,34 +204,36 @@ class BatchNormLayer(base_layer.BaseLayer):
     with tf.name_scope(p.name):
       if self.do_eval:
         # The mean and variance used for normalization.
-        norm_mean, norm_variance = self._moving_mean, self._moving_variance
+        norm_mean, norm_variance = (self.vars.moving_mean,
+                                    self.vars.moving_variance)
       else:
         mean, variance = self._Moments(inputs, 1.0 - paddings,
                                        p.enable_cross_replica_sum_on_tpu)
 
-        py_utils.UpdateBatchNormVars(self._moving_mean, mean, self._decay)
-        py_utils.UpdateBatchNormVars(self._moving_variance, variance,
+        py_utils.UpdateBatchNormVars(self.vars.moving_mean, mean, self._decay)
+        py_utils.UpdateBatchNormVars(self.vars.moving_variance, variance,
                                      self._decay)
         # Add some summaries for visualization.
         summary_utils.histogram('%s_mean' % p.name, tf.cast(mean, tf.float32))
         summary_utils.histogram('%s_variance' % p.name,
                                 tf.cast(variance, tf.float32))
         summary_utils.histogram('%s_moving_mean' % p.name,
-                                tf.cast(self._moving_mean, tf.float32))
+                                tf.cast(self.vars.moving_mean, tf.float32))
         summary_utils.histogram('%s_moving_variance' % p.name,
-                                tf.cast(self._moving_variance, tf.float32))
-        summary_utils.histogram('%s_mean_diff' % p.name,
-                                tf.cast(mean - self._moving_mean, tf.float32))
+                                tf.cast(self.vars.moving_variance, tf.float32))
+        summary_utils.histogram(
+            '%s_mean_diff' % p.name,
+            tf.cast(mean - self.vars.moving_mean, tf.float32))
         summary_utils.histogram(
             '%s_variance_diff' % p.name,
-            tf.cast(variance - self._moving_variance, tf.float32))
+            tf.cast(variance - self.vars.moving_variance, tf.float32))
         if p.use_moving_avg_in_training:
           # Use the global statistics for normalization.
           # Control dependencies on mean and variance make sure
           # moving_mean and variance will be updated for every training step.
-          norm_mean = py_utils.with_dependencies([mean], self._moving_mean)
+          norm_mean = py_utils.with_dependencies([mean], self.vars.moving_mean)
           norm_variance = py_utils.with_dependencies([variance],
-                                                     self._moving_variance)
+                                                     self.vars.moving_variance)
         else:
           # Use the batch statistics for normalization.
           norm_mean = mean

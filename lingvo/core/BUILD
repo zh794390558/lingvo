@@ -157,6 +157,7 @@ py_test(
         ":base_input_generator",
         ":test_utils",
         "//lingvo:compat",
+        # Implicit mock dependency.
         # Implicit numpy dependency.
         # Implicit six dependency.
     ],
@@ -196,6 +197,30 @@ py_test(
         ":base_layer",
         ":hyperparams",
         ":py_utils",
+        ":test_utils",
+        "//lingvo:compat",
+    ],
+)
+
+py_library(
+    name = "reversible_layers",
+    srcs = ["reversible_layers.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":base_layer",
+        ":py_utils",
+        "//lingvo:compat",
+        # Implicit six dependency.
+    ],
+)
+
+py_test(
+    name = "reversible_layers_test",
+    srcs = ["reversible_layers_test.py"],
+    deps = [
+        ":layers",
+        ":py_utils",
+        ":reversible_layers",
         ":test_utils",
         "//lingvo:compat",
     ],
@@ -343,7 +368,6 @@ py_test(
     srcs = ["cluster_test.py"],
     deps = [
         ":cluster_factory",
-        ":py_utils",
         ":test_utils",
         "//lingvo:compat",
         # Implicit numpy dependency.
@@ -356,7 +380,7 @@ py_library(
     srcs = ["datasource.py"],
     srcs_version = "PY2AND3",
     deps = [
-        ":hyperparams",
+        ":base_layer",
         ":py_utils",
         "//lingvo:compat",
         # Implicit six dependency.
@@ -441,6 +465,7 @@ py_test(
     srcs = ["hyperparams_test.py"],
     deps = [
         ":hyperparams",
+        ":hyperparams_py_pb2",
         ":symbolic",
         ":test_utils",
         "//lingvo:compat",
@@ -645,8 +670,12 @@ py_library(
         "//lingvo:compat",
         # Implicit numpy dependency.
         # Implicit six dependency.
-        # Implicit sklearn dependency.
-    ],
+    ] + select({
+        "//lingvo:py3_mode": [
+            # Implicit sklearn dependency.
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 py_test(
@@ -719,7 +748,7 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         ":py_utils",
-        # Implicit Tkinter dependency.
+        # Implicit Tkinter dependency.  # buildcleaner: keep
         "//lingvo:compat",
         # Implicit matplotlib dependency.
         # Implicit numpy dependency.
@@ -792,8 +821,8 @@ py_library(
         ":py_utils",
         # Implicit absl.flags dependency.
         # Implicit concurrent.futures dependency.
+        "//lingvo:compat",
         # Implicit six dependency.
-        # Implicit tensorflow dependency.
     ],
 )
 
@@ -824,6 +853,7 @@ py_test(
     ],
     deps = [
         ":base_layer",
+        ":builder_layers",
         ":cluster_factory",
         ":py_utils",
         ":recurrent",
@@ -907,7 +937,6 @@ py_library(
         ":base_layer",
         ":py_utils",
         "//lingvo:compat",
-        # Implicit six dependency.
     ],
 )
 
@@ -1045,7 +1074,6 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         "//lingvo:compat",
-        # Implicit tensorflow dependency.
     ],
 )
 
@@ -1308,6 +1336,7 @@ py_library(
         ":rnn_cell",
         ":rnn_layers",
         ":test_utils",
+        # Implicit absl.testing.parameterized dependency.
         "//lingvo:compat",
         # Implicit numpy dependency.
         # Implicit six dependency.
@@ -1414,7 +1443,7 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         ":bn_layers",
-        # Implicit tensorflow dependency.
+        "//lingvo:compat",
     ],
 )
 
@@ -1435,7 +1464,9 @@ py_library(
     srcs = ["program.py"],
     srcs_version = "PY2AND3",
     deps = [
+        ":base_model",
         ":checkpointer_lib",
+        ":cluster_factory",
         ":hyperparams",
         ":metrics",
         ":py_utils",
@@ -1493,6 +1524,22 @@ py_test(
         ":base_input_generator",
         ":base_model",
         ":checkpointer_lib",
+        ":py_utils",
+        ":test_utils",
+        "//lingvo:compat",
+    ],
+)
+
+py_test(
+    name = "ema_test",
+    srcs = ["ema_test.py"],
+    deps = [
+        ":base_decoder",
+        ":base_input_generator",
+        ":base_layer",
+        ":base_model",
+        ":checkpointer_lib",
+        ":layers",
         ":py_utils",
         ":test_utils",
         "//lingvo:compat",

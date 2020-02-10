@@ -22,23 +22,19 @@ from __future__ import print_function
 import os
 
 import lingvo.compat as tf
-from lingvo.core import hyperparams
+from lingvo.core import base_layer
 from lingvo.core import py_utils
 
 import six
 from six.moves import range
 
 
-class DataSource(object):
+class DataSource(base_layer.BaseLayer):
   """A base class for file based Data Sources."""
 
   @classmethod
   def Params(cls):
-    p = hyperparams.InstantiableParams(cls)
-    return p
-
-  def __init__(self, params):
-    self.params = params.Copy()
+    return super(DataSource, cls).Params().Set(name='datasource')
 
   def BuildDataSource(self, data_source_from_file_pattern_fn):
     """Builds a data source.
@@ -287,7 +283,8 @@ class CrossBatchMixingDataSource(DataSource):
     else:
       bprop_variable_filters = p.bprop_variable_filters
 
-    data_source, selected_bprop = py_utils.MixByWeight(inputs, weights)
+    data_source, selected_bprop = py_utils.MixByWeight(
+        inputs, weights, seed=p.random_seed)
     # TODO(neerajgaur): Remove _bprop_onehot and change code that uses it to
     # use source_selected from input_batch.
     batch_size = py_utils.GetShape(tf.nest.flatten(data_source)[0])[0]
@@ -389,19 +386,12 @@ class CurriculumDataSource(DataSource):
     return ret
 
 
-class PrefixedDataSourceWrapper(DataSource):
-  """Prepends paths to file patterns of another DataSource.
-
-  Target DataSource must have parameter `file_patterns`. Resulting file patterns
-  are of the form [file_pattern_prefix/]pattern
-  """
+class PrefixedDataSource(SimpleDataSource):
+  """Prepends path prefix to file patterns."""
 
   @classmethod
   def Params(cls):
-    p = super(PrefixedDataSourceWrapper, cls).Params()
-
-    p.Define('base_datasource', SimpleDataSource.Params(),
-             'Wrapped DataSource that has a `file_patterns` parameter.')
+    p = super(PrefixedDataSource, cls).Params()
     p.Define(
         'file_pattern_prefix', '',
         'Prefix to add to file_pattern, eg. a base directory that contains '
@@ -410,18 +400,10 @@ class PrefixedDataSourceWrapper(DataSource):
     return p
 
   def __init__(self, params):
-    super(PrefixedDataSourceWrapper, self).__init__(params)
+    super(PrefixedDataSource, self).__init__(params)
 
     p = self.params
 
-    assert p.base_datasource.cls is SimpleDataSource, (
-        'PrefixedDataSourceWrapper currently only supports SimpleDataSource')
-
-    patterns = p.base_datasource.file_pattern.split(',')
-    p.base_datasource.file_pattern = ','.join(
+    patterns = p.file_pattern.split(',')
+    p.file_pattern = ','.join(
         os.path.join(p.file_pattern_prefix, pattern) for pattern in patterns)
-
-    self._datasource = p.base_datasource.Instantiate()
-
-  def BuildDataSource(self, *args, **kwargs):
-    return self._datasource.BuildDataSource(*args, **kwargs)

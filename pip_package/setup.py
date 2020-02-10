@@ -20,8 +20,9 @@ from setuptools import find_packages
 from setuptools import setup
 from setuptools.command.install import install
 from setuptools.dist import Distribution
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
-__version__ = '0.6.0'
+__version__ = '0.6.4'
 project_name = 'lingvo'
 if '--project_name' in sys.argv:
   project_name_idx = sys.argv.index('--project_name')
@@ -36,11 +37,11 @@ REQUIRED_PACKAGES = [
     'matplotlib',
     'model-pruning-google-research',
     'Pillow',
-    'protobuf>=3.7,<4',
+    'protobuf>=3.8,<4',
     'sklearn',
     'sympy',
-    'tensorflow-gpu',
-    'waymo-open-dataset-2-0-0',
+    'tensorflow-gpu==' + tf.__version__,
+    'waymo-open-dataset-tf-2-1-0',
 ]
 
 
@@ -72,7 +73,7 @@ setup(
     author_email='lingvo-bot@google.com',
     packages=find_packages(include=['lingvo*'], exclude=[]),
     include_package_data=True,
-    python_requires='>=3',
+    python_requires='>=3.6',
     install_requires=REQUIRED_PACKAGES,
     zip_safe=False,
     cmdclass={
@@ -87,6 +88,7 @@ setup(
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
         'Topic :: Scientific/Engineering',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
         'Topic :: Software Development',
