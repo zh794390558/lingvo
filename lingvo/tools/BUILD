@@ -169,6 +169,17 @@ py_binary(
     ],
 )
 
+py_binary(
+    name = "create_speaker_features",
+    srcs = ["create_speaker_features.py"],
+    python_version = "PY3",
+    srcs_version = "PY2AND3",
+    deps = [
+        "//lingvo:compat",
+        # Implicit six dependency.
+    ],
+)
+
 lingvo_cc_binary(
     name = "generate_proto_def",
     srcs = ["generate_proto_def.cc"],
