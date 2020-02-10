@@ -145,8 +145,7 @@ def _ReadSpk2utt():
   with open(FLAGS.input_spk2utt, mode='r') as f:
     n = 0
     tf.logging.info('First pass: loading spk2utt files...')
-    spk2id = {}
-    s = 0
+    spks = []
     for line in f:
       if not line:
         continue
@@ -154,6 +153,11 @@ def _ReadSpk2utt():
       if 0 == n % 10000:
         tf.logging.info('Scanned %d entries...', n)
       spk, utts = line.strip().split(maxsplit=1) 
+      spks.append(spk)
+    spks.sort()
+    s = 0
+    spk2id = {}
+    for spk in spks:
       spk2id[spk] = s
       tf.logging.info('[%s] = %d id', spk, s)
       s += 1

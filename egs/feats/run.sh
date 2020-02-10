@@ -21,6 +21,12 @@ fi
 if [ $stage -le 0 ] && [ $stage -ge 0 ];then
   echo "build create_speaker_features..."
   bazel build lingvo/tools:create_speaker_features || exit 1
+  echo "dump spk2id map..."
+  ./bazel-bin/lingvo/tools/create_speaker_features \
+    --logtostderr \
+    --dump_spk2id \
+    --input_spk2utt $egs_dir/data/spk2utt \
+    --spk2id_filepath $egs_dir/data/spk2id
   echo "dump feats to tfrecords..."
   ./bazel-bin/lingvo/tools/create_speaker_features \
     --logtostderr \
